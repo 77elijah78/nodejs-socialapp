@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: social-backend-ingress
+  namespace: social-backend
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    # ─── WebSocket support ───────────────────────────────────
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$http_x_forwarded_for"  # sticky sessions
+    # ─── Rate limiting ───────────────────────────────────────
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+    nginx.ingress.kubernetes.io/limit-rps: "30"
+    # ─── TLS / HTTPS ─────────────────────────────────────────
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.yourdomain.com
+      secretName: social-backend-tls
+  rules:
+    - host: api.yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: social-backend
+                port:
+                  number: 80

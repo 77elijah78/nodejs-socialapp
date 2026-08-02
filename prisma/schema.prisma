@@ -1,0 +1,276 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// USER
+// ─────────────────────────────────────────────────────────────
+model User {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  displayName  String?  @map("display_name")
+  bio          String?
+  avatarUrl    String?  @map("avatar_url")
+  isVerified   Boolean  @default(false) @map("is_verified")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Auth
+  refreshTokens RefreshToken[]
+
+  // Social graph
+  followers Follow[] @relation("Following")
+  following Follow[] @relation("Followers")
+
+  // Content
+  posts    Post[]
+  likes    Like[]
+  comments Comment[]
+  savedBy  SavedPost[]
+
+  // Messaging
+  sentMessages     Message[] @relation("SentMessages")
+  receivedMessages Message[] @relation("ReceivedMessages")
+  conversations    ConversationParticipant[]
+
+  // Stories
+  stories    Story[]
+  storyViews StoryView[] @relation("StoryViews")
+
+  // Notifications
+  notifications Notification[]
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────
+// AUTH TOKENS
+// ─────────────────────────────────────────────────────────────
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ─────────────────────────────────────────────────────────────
+// SOCIAL GRAPH
+// ─────────────────────────────────────────────────────────────
+model Follow {
+  followerId  String   @map("follower_id")
+  followingId String   @map("following_id")
+  follower    User     @relation("Followers", fields: [followerId], references: [id], onDelete: Cascade)
+  following   User     @relation("Following", fields: [followingId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@id([followerId, followingId])
+  @@map("follows")
+}
+
+// ─────────────────────────────────────────────────────────────
+// POSTS
+// ─────────────────────────────────────────────────────────────
+model Post {
+  id        String    @id @default(uuid())
+  content   String
+  imageUrls String[]  @map("image_urls")
+  videoUrl  String?   @map("video_url")
+  authorId  String    @map("author_id")
+  author    User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  likes     Like[]
+  comments  Comment[]
+  savedBy   SavedPost[]
+
+  @@index([authorId])
+  @@map("posts")
+}
+
+model Like {
+  userId    String   @map("user_id")
+  postId    String   @map("post_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@id([userId, postId])
+  @@map("likes")
+}
+
+model Comment {
+  id         String    @id @default(uuid())
+  content    String
+  authorId   String    @map("author_id")
+  postId     String    @map("post_id")
+  author     User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  post       Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  repliedToId String?  @map("replied_to_id")
+
+  @@index([postId])
+  @@map("comments")
+}
+
+// ─────────────────────────────────────────────────────────────
+// SAVED / BOOKMARKED POSTS (Instagram-like)
+// ─────────────────────────────────────────────────────────────
+model SavedPost {
+  userId    String   @map("user_id")
+  postId    String   @map("post_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@id([userId, postId])
+  @@map("saved_posts")
+}
+
+// ─────────────────────────────────────────────────────────────
+// MESSAGING
+// ─────────────────────────────────────────────────────────────
+model Conversation {
+  id           String   @id @default(uuid())
+  isGroup      Boolean  @default(false) @map("is_group")
+  groupName    String?  @map("group_name")
+  groupAvatar  String?  @map("group_avatar")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@map("conversations")
+}
+
+model ConversationParticipant {
+  conversationId String       @map("conversation_id")
+  userId         String       @map("user_id")
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt       DateTime     @default(now()) @map("joined_at")
+  lastReadAt     DateTime?    @map("last_read_at")
+
+  @@id([conversationId, userId])
+  @@map("conversation_participants")
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT
+}
+
+enum MessageStatus {
+  SENDING
+  SENT
+  DELIVERED
+  READ
+}
+
+model Message {
+  id             String        @id @default(uuid())
+  content        String
+  mediaUrl       String?       @map("media_url")
+  thumbnailUrl   String?       @map("thumbnail_url")
+  type           MessageType   @default(TEXT)
+  status         MessageStatus @default(SENT) @map("status")
+  senderId       String        @map("sender_id")
+  receiverId     String?       @map("receiver_id")
+  conversationId String        @map("conversation_id")
+  sender         User          @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver       User?         @relation("ReceivedMessages", fields: [receiverId], references: [id])
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  isRead         Boolean       @default(false) @map("is_read")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  editedAt       DateTime?     @map("edited_at")
+  deletedAt      DateTime?     @map("deleted_at")
+  deletedBy      String?       @map("deleted_by")
+  duration       Float?        @map("duration")
+  repliedToId    String?       @map("replied_to_id")
+  repliedTo      Message?      @relation("Replies", fields: [repliedToId], references: [id])
+  replies        Message[]     @relation("Replies")
+  forwardedFromId String?      @map("forwarded_from_id")
+  forwardedFrom  Message?      @relation("Forwards", fields: [forwardedFromId], references: [id])
+  forwards       Message[]     @relation("Forwards")
+
+  @@index([conversationId])
+  @@index([senderId])
+  @@index([repliedToId])
+  @@index([forwardedFromId])
+  @@map("messages")
+}
+
+// ─────────────────────────────────────────────────────────────
+// STORIES (Instagram-style)
+// ─────────────────────────────────────────────────────────────
+model Story {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaUrl  String   @map("media_url")
+  mediaType String   @map("media_type")
+  caption   String?
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  views StoryView[]
+
+  @@index([userId])
+  @@map("stories")
+}
+
+model StoryView {
+  storyId   String   @map("story_id")
+  story     Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  viewerId  String   @map("viewer_id")
+  viewer    User     @relation("StoryViews", fields: [viewerId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@id([storyId, viewerId])
+  @@map("story_views")
+}
+
+// ─────────────────────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────────────────────
+enum NotificationType {
+  LIKE
+  COMMENT
+  FOLLOW
+  MESSAGE
+  MENTION
+}
+
+model Notification {
+  id         String           @id @default(uuid())
+  type       NotificationType
+  content    String
+  isRead     Boolean          @default(false) @map("is_read")
+  userId     String           @map("user_id")
+  actorId    String?          @map("actor_id")
+  resourceId String?          @map("resource_id")
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime         @default(now()) @map("created_at")
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}

@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+*.log
+logs/
+.git
+.gitignore
+README.md
+docker
+k8s
+*.md
