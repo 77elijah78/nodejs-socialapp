@@ -166,4 +166,15 @@ export const postController = {
       next(err);
     }
   },
+
+  async viewStory(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const { storyId } = req.params;
+      await postService.markStoryViewed(userId, storyId as string);
+      sendSuccess(res, { viewed: true });
+    } catch (err) {
+      next(err);
+    }
+  },
 };

@@ -11,6 +11,7 @@ router.get('/stories', authenticate, postController.getStories);
 router.get('/saved', authenticate, postController.getSaved);
 router.post('/', authenticate, validate(createPostSchema), postController.create);
 router.post('/stories', authenticate, validate(createStorySchema), postController.createStory);
+router.post('/stories/:storyId/view', authenticate, postController.viewStory);
 router.get('/:id', optionalAuth, postController.getOne);
 router.patch('/:id', authenticate, validate(updatePostSchema), postController.update);
 router.delete('/:id', authenticate, postController.remove);

@@ -231,4 +231,27 @@ export const postService = {
 
     return story;
   },
+
+  async markStoryViewed(viewerId: string, storyId: string) {
+    const story = await prisma.story.findUnique({
+      where: { id: storyId },
+      select: { userId: true },
+    });
+    if (!story) {
+      throw new NotFoundError("Story not found");
+    }
+    await prisma.storyView.upsert({
+      where: {
+        storyId_viewerId: {
+          storyId,
+          viewerId,
+        },
+      },
+      create: {
+        storyId,
+        viewerId,
+      },
+      update: {},
+    });
+  },
 };
