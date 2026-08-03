@@ -30,7 +30,7 @@ export const MEDIA_TYPES = {
 export type MediaCategory = keyof typeof MEDIA_TYPES;
 
 // All accepted mimes (for mixed endpoint)
-const ALL_MIMES = Object.values(MEDIA_TYPES).flatMap((t) => t.mimes);
+const ALL_MIMES = Object.values(MEDIA_TYPES).flatMap((t) => t.mimes) as string[];
 
 // ─── Resolve category from mimetype ───────────────────────────────
 export const getCategoryFromMime = (mime: string): MediaCategory | null => {

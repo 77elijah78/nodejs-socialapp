@@ -1,9 +1,16 @@
 import path from 'path';
 import fs from 'fs/promises';
-import sharp from 'sharp';
 import { v4 as uuidv4 } from 'uuid';
 import { getCategoryFromMime, MEDIA_TYPES, MediaCategory } from '../middlewares/upload.js';
 import { logger } from '../config/logger.js';
+
+// sharp is optional — gracefully handle its absence at runtime
+let sharp: any = null;
+try {
+  sharp = (await import('sharp' as string)).default;
+} catch {
+  logger.warn('sharp not installed — image processing will be skipped');
+}
 
 const UPLOADS_ROOT = process.env.UPLOADS_PATH ?? 'uploads';
 const BASE_URL = process.env.BASE_URL ?? 'http://localhost:3000';
@@ -43,7 +50,7 @@ export const processUploadedFile = async (
   };
 
   // ── Image: generate thumbnail + extract dimensions ────────────
-  if (category === 'image') {
+  if (category === 'image' && sharp) {
     try {
       const meta = await sharp(file.path).metadata();
       result.width = meta.width;
