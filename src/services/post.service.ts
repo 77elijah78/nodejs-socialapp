@@ -238,7 +238,7 @@ export const postService = {
       select: { userId: true },
     });
     if (!story) {
-      throw new NotFoundError("Story not found");
+       throw new NotFoundError("Story");
     }
     await prisma.storyView.upsert({
       where: {
