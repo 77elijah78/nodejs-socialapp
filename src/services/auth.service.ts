@@ -36,7 +36,7 @@ export const authService = {
         passwordHash,
         displayName: input.displayName,
       },
-      select: { id: true, username: true, email: true, displayName: true, createdAt: true },
+      select: { id: true, username: true, email: true, displayName: true, avatarUrl: true, createdAt: true },
     });
 
     const payload = { userId: user.id, email: user.email, username: user.username };

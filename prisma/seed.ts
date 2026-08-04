@@ -10,25 +10,27 @@ async function main() {
 
   const alice = await prisma.user.upsert({
     where: { email: 'alice@example.com' },
-    update: {},
+    update: { avatarUrl: 'https://i.pravatar.cc/150?u=alice' },
     create: {
       username: 'alice',
       email: 'alice@example.com',
       passwordHash,
       displayName: 'Alice Wonder',
       bio: 'Full-stack developer & coffee lover ☕',
+      avatarUrl: 'https://i.pravatar.cc/150?u=alice',
     },
   });
 
   const bob = await prisma.user.upsert({
     where: { email: 'bob@example.com' },
-    update: {},
+    update: { avatarUrl: 'https://i.pravatar.cc/150?u=bob' },
     create: {
       username: 'bob',
       email: 'bob@example.com',
       passwordHash,
       displayName: 'Bob Builder',
       bio: 'Building things one commit at a time 🔨',
+      avatarUrl: 'https://i.pravatar.cc/150?u=bob',
     },
   });
 

@@ -28,6 +28,8 @@ services:
       # Uploads stored outside the container so they persist
       UPLOADS_PATH: /app/uploads
       BASE_URL: http://192.168.1.4:3000
+      RATE_LIMIT_WINDOW_MS: 60000
+      RATE_LIMIT_MAX: 1000
     volumes:
       - ../src:/app/src
       - ../prisma:/app/prisma

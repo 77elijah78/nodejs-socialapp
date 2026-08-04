@@ -32,8 +32,8 @@ app.use(
 // ─── Rate limiting ────────────────────────────────────────────────
 app.use(
   rateLimit({
-    windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS ?? 900_000),
-    max: Number(process.env.RATE_LIMIT_MAX ?? 100),
+    windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000),
+    max: Number(process.env.RATE_LIMIT_MAX ?? 1000),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     message: { error: 'Too many requests, please try again later.' },
