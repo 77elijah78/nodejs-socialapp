@@ -147,6 +147,18 @@ export const postController = {
     }
   },
 
+  async getUserPosts(req: Request, res: Response, next: NextFunction) {
+    try {
+      const username = typeof req.params.username === "string" ? req.params.username : req.params.username[0];
+      const requesterId = (req as AuthRequest).user?.userId;
+      const { page, limit } = parsePagination(req.query);
+      const result = await postService.getUserPosts(username, requesterId, page, limit);
+      sendSuccess(res, result);
+    } catch (err) {
+      next(err);
+    }
+  },
+
   async getStories(req: Request, res: Response, next: NextFunction) {
     try {
       const { userId } = (req as AuthRequest).user;

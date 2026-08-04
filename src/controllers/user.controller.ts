@@ -29,6 +29,17 @@ export const userController = {
     }
   },
 
+  async searchUsers(req: Request, res: Response, next: NextFunction) {
+    try {
+      const q = (req.query.q as string) ?? '';
+      const requesterId = (req as AuthRequest).user?.userId;
+      const users = await userService.searchUsers(q, requesterId);
+      sendSuccess(res, users);
+    } catch (err) {
+      next(err);
+    }
+  },
+
   async updateProfile(req: Request, res: Response, next: NextFunction) {
     try {
       const { userId } = (req as AuthRequest).user;

@@ -30,6 +30,44 @@ export const userService = {
     return { ...user, isFollowing };
   },
 
+  async searchUsers(query: string, requesterId?: string) {
+    if (!query.trim()) return [];
+
+    const users = await prisma.user.findMany({
+      where: {
+        OR: [
+          { username: { contains: query, mode: 'insensitive' } },
+          { displayName: { contains: query, mode: 'insensitive' } },
+        ],
+      },
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        bio: true,
+        avatarUrl: true,
+        isVerified: true,
+        _count: { select: { followers: true, following: true, posts: true } },
+      },
+      take: 20,
+    });
+
+    const enriched = await Promise.all(
+      users.map(async (u) => {
+        let isFollowing = false;
+        if (requesterId) {
+          const follow = await prisma.follow.findUnique({
+            where: { followerId_followingId: { followerId: requesterId, followingId: u.id } },
+          });
+          isFollowing = !!follow;
+        }
+        return { ...u, isFollowing };
+      }),
+    );
+
+    return enriched;
+  },
+
   async updateProfile(
     userId: string,
     data: { displayName?: string; bio?: string; avatarUrl?: string }

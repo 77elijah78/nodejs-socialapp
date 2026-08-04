@@ -218,6 +218,49 @@ export const postService = {
     return stories;
   },
 
+  async getUserPosts(username: string, requesterId: string | undefined, page: number, limit: number) {
+    const user = await prisma.user.findUnique({
+      where: { username },
+      select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, isVerified: true },
+    });
+    if (!user) throw new NotFoundError('User');
+
+    const [posts, total] = await Promise.all([
+      prisma.post.findMany({
+        where: { authorId: user.id, deletedAt: null },
+        select: postSelect,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.post.count({ where: { authorId: user.id, deletedAt: null } }),
+    ]);
+
+    const likedPostIds = requesterId
+      ? await prisma.like.findMany({
+          where: { userId: requesterId, postId: { in: posts.map((p) => p.id) } },
+          select: { postId: true },
+        })
+      : [];
+
+    const likedSet = new Set(likedPostIds.map((l) => l.postId));
+
+    const enriched = posts.map((p) => ({
+      ...p,
+      isLiked: likedSet.has(p.id),
+      isSaved: false,
+    }));
+
+    return {
+      user: {
+        ...user,
+        _count: { posts: total },
+      },
+      posts: enriched,
+      total,
+    };
+  },
+
   async createStory(userId: string, data: { mediaUrl: string; mediaType: string; caption?: string }) {
     const story = await prisma.story.create({
       data: {

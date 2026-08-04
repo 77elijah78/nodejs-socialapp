@@ -6,6 +6,7 @@ import { updateProfileSchema } from '../middlewares/schemas.js';
 
 const router = Router();
 
+router.get('/search', optionalAuth, userController.searchUsers);
 router.get('/:username', optionalAuth, userController.getProfile);
 router.patch('/me', authenticate, validate(updateProfileSchema), userController.updateProfile);
 router.post('/:username/follow', authenticate, userController.follow);
