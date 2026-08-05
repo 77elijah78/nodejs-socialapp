@@ -101,6 +101,7 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
     id: event.messageId,
     content: event.content,
     conversationId: event.conversationId,
+    receiverId: event.receiverId,
     mediaUrl: event.mediaUrl ?? null,
     thumbnailUrl: event.thumbnailUrl ?? null,
     type: event.type,
