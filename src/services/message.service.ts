@@ -351,6 +351,82 @@ export const messageService = {
     });
   },
 
+  async replyMessage(
+    conversationId: string,
+    senderId: string,
+    content: string,
+    repliedToId: string,
+    receiverId?: string,
+    options?: {
+      mediaUrl?: string | null;
+      thumbnailUrl?: string | null;
+      type?: MessageStatus;
+      duration?: number | null;
+    }
+  ) {
+    const participant = await prisma.conversationParticipant.findUnique({
+      where: { conversationId_userId: { conversationId, userId: senderId } },
+    });
+    if (!participant) throw new ForbiddenError('Not a participant in this conversation');
+    if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
+
+    const repliedTo = await prisma.message.findUnique({
+      where: { id: repliedToId },
+      select: { id: true, conversationId: true },
+    });
+    if (!repliedTo || repliedTo.conversationId !== conversationId) {
+      throw new ValidationError('Invalid reply target');
+    }
+
+    const message = await prisma.message.create({
+      data: {
+        content,
+        mediaUrl: options?.mediaUrl ?? null,
+        thumbnailUrl: options?.thumbnailUrl ?? null,
+        type: (options?.type as any) ?? 'TEXT',
+        status: 'SENT',
+        senderId,
+        receiverId: receiverId ?? null,
+        conversationId,
+        repliedToId,
+        duration: options?.duration ?? null,
+      },
+      include: {
+        sender: { select: { id: true, username: true, avatarUrl: true } },
+        repliedTo: {
+          select: {
+            id: true,
+            content: true,
+            senderId: true,
+            type: true,
+            sender: { select: { username: true, avatarUrl: true } },
+          },
+        },
+      },
+    });
+
+    await prisma.conversation.update({
+      where: { id: conversationId },
+      data: { updatedAt: new Date() },
+    });
+
+    await kafkaEvents.chatMessage({
+      messageId: message.id,
+      conversationId,
+      senderId,
+      senderUsername: message.sender.username,
+      senderAvatarUrl: message.sender.avatarUrl,
+      receiverId,
+      content,
+      mediaUrl: message.mediaUrl,
+      thumbnailUrl: message.thumbnailUrl,
+      type: message.type,
+      createdAt: message.createdAt.toISOString(),
+    });
+
+    return message;
+  },
+
   async deleteConversation(conversationId: string, userId: string) {
     const participant = await prisma.conversationParticipant.findUnique({
       where: { conversationId_userId: { conversationId, userId } },

@@ -105,6 +105,22 @@ export const forwardMessageSchema = z.object({
   }),
 });
 
+export const replyMessageSchema = z.object({
+  body: z.object({
+    content: z.string().max(5000).optional(),
+    mediaUrl: z.string().url().optional(),
+    thumbnailUrl: z.string().url().optional(),
+    type: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT']).optional(),
+    duration: z.number().optional(),
+    repliedToId: z.string().uuid(),
+    receiverId: z.string().uuid().optional(),
+  }).refine(
+    (data) => data.content || data.mediaUrl,
+    { message: 'Either content or mediaUrl must be provided' }
+  ),
+  params: z.object({ conversationId: z.string().uuid() }),
+});
+
 export const markDeliveredSchema = z.object({
   body: z.object({
     messageIds: z.array(z.string().uuid()).min(1),

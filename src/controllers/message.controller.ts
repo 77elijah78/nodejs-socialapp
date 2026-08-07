@@ -148,4 +148,24 @@ export const messageController = {
       next(err);
     }
   },
+
+  async replyMessage(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const conversationId = getParamValue(req.params.conversationId);
+      const { content, mediaUrl, thumbnailUrl, type, duration, repliedToId, receiverId } = req.body;
+
+      if (!conversationId) {
+        return res.status(400).json({ error: 'Conversation ID is required' });
+      }
+
+      const message = await messageService.replyMessage(
+        conversationId, userId, content, repliedToId, receiverId,
+        { mediaUrl, thumbnailUrl, type, duration }
+      );
+      sendSuccess(res, message, 'Reply sent', 201);
+    } catch (err) {
+      next(err);
+    }
+  },
 };
