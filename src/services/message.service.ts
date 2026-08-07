@@ -1,41 +1,77 @@
 import { prisma } from '../config/database.js';
-import { NotFoundError, ForbiddenError } from '../utils/errors.js';
+import { NotFoundError, ForbiddenError, ValidationError } from '../utils/errors.js';
 import { kafkaEvents } from '../kafka/producer.js';
 import { MessageStatus } from '../types/index.js';
 
 export const messageService = {
   async getOrCreateConversation(userAId: string, userBId: string) {
+    if (userAId === userBId) {
+      throw new ValidationError('Cannot create a conversation with yourself');
+    }
+
+    // Find existing active DM where BOTH users are participants AND neither has deleted it
     const existing = await prisma.conversation.findFirst({
       where: {
         isGroup: false,
-        participants: { every: { userId: { in: [userAId, userBId] } } },
+        AND: [
+          { participants: { some: { userId: userAId } } },
+          { participants: { some: { userId: userBId } } },
+        ],
+        participants: {
+          none: { deletedAt: { not: null } },
+        },
       },
-      include: { participants: { include: { user: { select: { id: true, username: true, displayName: true, avatarUrl: true } } } } },
+      include: {
+        participants: {
+          include: { user: { select: { id: true, username: true, displayName: true, avatarUrl: true } } },
+        },
+      },
     });
 
-    if (existing && existing.participants.length === 2) return existing;
+    if (existing) return existing;
 
-    const participants = userAId === userBId
-      ? [{ userId: userAId }]
-      : [{ userId: userAId }, { userId: userBId }];
+    // If a conversation between these two users exists but one party deleted it,
+    // hard-delete the stale one and create a fresh conversation
+    const stale = await prisma.conversation.findFirst({
+      where: {
+        isGroup: false,
+        AND: [
+          { participants: { some: { userId: userAId } } },
+          { participants: { some: { userId: userBId } } },
+        ],
+      },
+    });
+
+    if (stale) {
+      await prisma.conversation.delete({ where: { id: stale.id } });
+    }
 
     return prisma.conversation.create({
       data: {
         isGroup: false,
         participants: {
-          create: participants,
+          create: [{ userId: userAId }, { userId: userBId }],
         },
       },
-      include: { participants: { include: { user: { select: { id: true, username: true, displayName: true, avatarUrl: true } } } } },
+      include: {
+        participants: {
+          include: { user: { select: { id: true, username: true, displayName: true, avatarUrl: true } } },
+        },
+      },
     });
   },
 
   async getUserConversations(userId: string) {
     return prisma.conversation.findMany({
-      where: { participants: { some: { userId } } },
+      where: {
+        participants: { some: { userId, deletedAt: null } },
+      },
       include: {
         participants: {
-          include: { user: { select: { id: true, username: true, displayName: true, avatarUrl: true } } },
+          where: { deletedAt: null },
+          include: {
+            user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          },
         },
         messages: { orderBy: { createdAt: 'desc' }, take: 1 },
       },
@@ -48,6 +84,7 @@ export const messageService = {
       where: { conversationId_userId: { conversationId, userId } },
     });
     if (!participant) throw new ForbiddenError('Not a participant in this conversation');
+    if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
 
     const [messages, total] = await Promise.all([
       prisma.message.findMany({
@@ -103,6 +140,7 @@ export const messageService = {
       where: { conversationId_userId: { conversationId, userId: senderId } },
     });
     if (!participant) throw new ForbiddenError('Not a participant in this conversation');
+    if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
 
     // 1. Persist to PostgreSQL
     const message = await prisma.message.create({
@@ -245,6 +283,7 @@ export const messageService = {
       where: { conversationId_userId: { conversationId, userId } },
     });
     if (!participant) throw new ForbiddenError('Not a participant');
+    if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
 
     await prisma.message.updateMany({
       where: {
@@ -278,6 +317,7 @@ export const messageService = {
       where: { conversationId_userId: { conversationId: targetConversationId, userId: senderId } },
     });
     if (!participant) throw new ForbiddenError('Not a participant in target conversation');
+    if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
 
     const forwarded = await prisma.message.create({
       data: {
@@ -309,5 +349,30 @@ export const messageService = {
       where: { id: messageId },
       include: { sender: { select: { id: true, username: true, avatarUrl: true } } },
     });
+  },
+
+  async deleteConversation(conversationId: string, userId: string) {
+    const participant = await prisma.conversationParticipant.findUnique({
+      where: { conversationId_userId: { conversationId, userId } },
+    });
+    if (!participant) throw new NotFoundError('Conversation');
+
+    if (participant.deletedAt) {
+      throw new ValidationError('Conversation already deleted');
+    }
+
+    const now = new Date();
+    await prisma.conversationParticipant.update({
+      where: { conversationId_userId: { conversationId, userId } },
+      data: { deletedAt: now },
+    });
+
+    await kafkaEvents.conversationDeleted({
+      conversationId,
+      userId,
+      deletedAt: now.toISOString(),
+    });
+
+    return { conversationId, deletedAt: now.toISOString() };
   },
 };

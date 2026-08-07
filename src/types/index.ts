@@ -115,6 +115,7 @@ export interface ConversationParticipant {
   userId: string;
   joinedAt: Date;
   lastReadAt: Date | null;
+  deletedAt: Date | null;
   conversation?: Conversation;
   user?: User;
 }

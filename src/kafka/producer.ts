@@ -113,6 +113,12 @@ export interface MessageDeletedForMeEvent {
   userId: string;
 }
 
+export interface ConversationDeletedEvent {
+  conversationId: string;
+  userId: string;
+  deletedAt: string;
+}
+
 export const kafkaEvents = {
   chatMessage: (event: ChatMessageEvent) =>
     publishEvent(TOPICS.CHAT_MESSAGES, event, event.conversationId),
@@ -137,4 +143,7 @@ export const kafkaEvents = {
 
    messageDeletedForMe: (event: MessageDeletedForMeEvent) =>
     publishEvent(TOPICS.CHAT_DELETED_FOR_ME, event, event.userId),
+
+   conversationDeleted: (event: ConversationDeletedEvent) =>
+    publishEvent(TOPICS.CONVERSATION_DELETED, event, event.conversationId),
 };

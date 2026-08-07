@@ -28,6 +28,7 @@ export const TOPICS = {
   CHAT_EDITED:          'chat.edited',
   CHAT_DELETED:         'chat.deleted',
   CHAT_DELETED_FOR_ME:  'chat.deleted-for-me',
+  CONVERSATION_DELETED: 'chat.conversation-deleted',
   NOTIFICATIONS:        'chat.notifications',
   PRESENCE:             'chat.presence',
   MESSAGE_READ:         'chat.message-read',

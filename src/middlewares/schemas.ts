@@ -60,6 +60,10 @@ export const startConversationSchema = z.object({
   body: z.object({ userId: z.string().uuid() }),
 });
 
+export const deleteConversationSchema = z.object({
+  params: z.object({ conversationId: z.string().uuid() }),
+});
+
 export const sendMessageSchema = z.object({
   body: z.object({
     content: z.string().max(5000).optional(),

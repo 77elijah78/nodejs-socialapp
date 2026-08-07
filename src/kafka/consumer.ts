@@ -11,6 +11,7 @@ import type {
   MessageEditedEvent,
   MessageDeletedEvent,
   MessageDeletedForMeEvent,
+  ConversationDeletedEvent,
 } from './producer.js';
 
 let consumer: Consumer;
@@ -86,6 +87,10 @@ async function routeEvent(io: Server, topic: string, payload: unknown): Promise<
 
     case TOPICS.MESSAGE_READ:
       handleMessageRead(io, payload as MessageReadEvent);
+      break;
+
+    case TOPICS.CONVERSATION_DELETED:
+      handleConversationDeleted(io, payload as ConversationDeletedEvent);
       break;
 
     default:
@@ -216,5 +221,18 @@ function handleMessageRead(io: Server, event: MessageReadEvent): void {
 
   logger.debug(
     `[Kafka→WS] message-read → conversation:${event.conversationId}`
+  );
+}
+
+function handleConversationDeleted(io: Server, event: ConversationDeletedEvent): void {
+  // Notify anyone in the conversation room that this conversation was deleted by a participant
+  io.to(`conversation:${event.conversationId}`).emit('conversation:deleted', {
+    conversationId: event.conversationId,
+    userId: event.userId,
+    deletedAt: event.deletedAt,
+  });
+
+  logger.debug(
+    `[Kafka→WS] conversation-deleted → conversation:${event.conversationId}`
   );
 }

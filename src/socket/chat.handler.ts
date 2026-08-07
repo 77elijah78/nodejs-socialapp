@@ -43,6 +43,10 @@ interface DeletePayload {
   deleteFor: 'me' | 'everyone';
 }
 
+interface DeleteConversationPayload {
+  conversationId: string;
+}
+
 interface ForwardPayload {
   conversationId: string;
   messageId: string;
@@ -64,6 +68,18 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Leave a conversation room
   socket.on('conversation:leave', (conversationId: string) => {
     socket.leave(`conversation:${conversationId}`);
+  });
+
+  // Delete (archive) a conversation for the current user
+  socket.on('conversation:delete', async (payload: DeleteConversationPayload, ack?: Function) => {
+    try {
+      await messageService.deleteConversation(payload.conversationId, socket.userId);
+      socket.leave(`conversation:${payload.conversationId}`);
+      ack?.({ success: true, conversationId: payload.conversationId });
+    } catch (err) {
+      logger.error('conversation:delete error', err);
+      ack?.({ success: false, error: (err as Error).message });
+    }
   });
 
   // Send message via WebSocket

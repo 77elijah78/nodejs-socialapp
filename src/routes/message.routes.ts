@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { messageController } from '../controllers/message.controller.js';
 import { authenticate } from '../middlewares/authenticate.js';
 import { validate } from '../middlewares/validate.js';
-import { sendMessageSchema, startConversationSchema, editMessageSchema, forwardMessageSchema, markDeliveredSchema } from '../middlewares/schemas.js';
+import { sendMessageSchema, startConversationSchema, deleteConversationSchema, editMessageSchema, forwardMessageSchema, markDeliveredSchema } from '../middlewares/schemas.js';
 
 const router = Router();
 
@@ -10,6 +10,7 @@ router.use(authenticate);
 
 router.get('/conversations', messageController.getConversations);
 router.post('/conversations', validate(startConversationSchema), messageController.startConversation);
+router.delete('/conversations/:conversationId', validate(deleteConversationSchema), messageController.deleteConversation);
 
 router.get('/conversations/:conversationId/messages', messageController.getMessages);
 router.post(

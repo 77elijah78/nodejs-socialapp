@@ -125,6 +125,7 @@ social-backend/
 |--------|------|------|-------------|
 | GET | `/conversations` | ✅ | List user conversations |
 | POST | `/conversations` | ✅ | Start DM conversation |
+| DELETE | `/conversations/:id` | ✅ | Delete (archive) a conversation for the current user |
 | GET | `/conversations/:id/messages` | ✅ | Get messages (paginated) |
 | POST | `/conversations/:id/messages` | ✅ | Send a REST message |
 
@@ -140,6 +141,7 @@ Connect with: `io('http://localhost:3000', { auth: { token: '<JWT>' } })`
 |-------|---------|-------------|
 | `conversation:join` | `conversationId: string` | Join a chat room |
 | `conversation:leave` | `conversationId: string` | Leave a chat room |
+| `conversation:delete` | `{ conversationId: string }` | Archive conversation for the current user |
 | `message:send` | `{ conversationId, content, receiverId? }` | Send real-time message |
 | `message:typing` | `{ conversationId, isTyping }` | Typing indicator |
 | `message:read` | `conversationId: string` | Mark messages read |
@@ -154,6 +156,7 @@ Connect with: `io('http://localhost:3000', { auth: { token: '<JWT>' } })`
 | `message:notification` | `{ conversationId, message }` | New message to personal room |
 | `message:typing` | `{ userId, username, isTyping, conversationId }` | Typing indicator |
 | `message:read` | `{ conversationId, userId }` | Read receipt |
+| `conversation:deleted` | `{ conversationId, userId, deletedAt }` | Conversation archived by a participant |
 | `presence:online` | `{ userId, username }` | User came online |
 | `presence:offline` | `{ userId, lastSeen }` | User went offline |
 | `presence:pong` | — | Heartbeat response |

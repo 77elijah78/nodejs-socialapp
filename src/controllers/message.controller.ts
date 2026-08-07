@@ -21,11 +21,27 @@ export const messageController = {
     }
   },
 
-  async startConversation(req: Request, res: Response, next: NextFunction) {
+   async startConversation(req: Request, res: Response, next: NextFunction) {
     try {
       const { userId } = (req as AuthRequest).user;
       const conversation = await messageService.getOrCreateConversation(userId, req.body.userId);
       sendSuccess(res, conversation, 'Conversation ready', 201);
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  async deleteConversation(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const conversationId = getParamValue(req.params.conversationId);
+
+      if (!conversationId) {
+        return res.status(400).json({ error: 'Conversation ID is required' });
+      }
+
+      const result = await messageService.deleteConversation(conversationId, userId);
+      sendSuccess(res, result, 'Conversation deleted');
     } catch (err) {
       next(err);
     }

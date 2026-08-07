@@ -165,6 +165,7 @@ model ConversationParticipant {
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   joinedAt       DateTime     @default(now()) @map("joined_at")
   lastReadAt     DateTime?    @map("last_read_at")
+  deletedAt      DateTime?    @map("deleted_at")
 
   @@id([conversationId, userId])
   @@map("conversation_participants")
