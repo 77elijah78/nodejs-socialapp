@@ -121,6 +121,7 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
   // Push notification to receiver's personal room (if they're not in the chat room)
   if (event.receiverId) {
     io.to(`user:${event.receiverId}`).emit('message:notification', {
+      id: event.messageId,
       conversationId: event.conversationId,
       senderId: event.senderId,
       sender: {
