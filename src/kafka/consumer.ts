@@ -101,7 +101,16 @@ async function routeEvent(io: Server, topic: string, payload: unknown): Promise<
 // ─── Handlers ─────────────────────────────────────────────────────
 
 function handleChatMessage(io: Server, event: ChatMessageEvent): void {
-  // Emit to everyone in the conversation room
+  const replyData = event.repliedToId
+    ? {
+        id: event.repliedToId,
+        content: event.repliedToContent,
+        senderId: event.repliedToSenderId,
+        senderUsername: event.repliedToSenderUsername,
+        type: event.repliedToType,
+      }
+    : null;
+
   io.to(`conversation:${event.conversationId}`).emit('message:new', {
     id: event.messageId,
     content: event.content,
@@ -111,6 +120,7 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
     thumbnailUrl: event.thumbnailUrl ?? null,
     type: event.type,
     createdAt: event.createdAt,
+    repliedTo: replyData,
     sender: {
       id: event.senderId,
       username: event.senderUsername,
@@ -118,7 +128,6 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
     },
   });
 
-  // Push notification to receiver's personal room (if they're not in the chat room)
   if (event.receiverId) {
     io.to(`user:${event.receiverId}`).emit('message:notification', {
       id: event.messageId,
@@ -133,6 +142,7 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
       thumbnailUrl: event.thumbnailUrl ?? null,
       type: event.type,
       createdAt: event.createdAt,
+      repliedTo: replyData,
     });
   }
 

@@ -17,6 +17,17 @@ interface SendMessagePayload {
   forwardedFromId?: string | null;
 }
 
+interface ReplyPayload {
+  conversationId: string;
+  content: string;
+  repliedToId: string;
+  receiverId?: string;
+  mediaUrl?: string | null;
+  thumbnailUrl?: string | null;
+  type?: string;
+  duration?: number | null;
+}
+
 interface TypingPayload {
   conversationId: string;
   isTyping: boolean;
@@ -98,6 +109,27 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
       ack?.({ success: true, messageId: message.id });
     } catch (err) {
       logger.error('message:send error', err);
+      ack?.({ success: false, error: (err as Error).message });
+    }
+  });
+
+  // Reply to a message via WebSocket
+  socket.on('message:reply', async (payload: ReplyPayload, ack?: Function) => {
+    try {
+      const { conversationId, content, repliedToId, receiverId, mediaUrl, thumbnailUrl, type, duration } = payload;
+
+      const message = await messageService.replyMessage(
+        conversationId,
+        socket.userId,
+        content,
+        repliedToId,
+        receiverId,
+        { mediaUrl, thumbnailUrl, type: type as any, duration }
+      );
+
+      ack?.({ success: true, messageId: message.id });
+    } catch (err) {
+      logger.error('message:reply error', err);
       ack?.({ success: false, error: (err as Error).message });
     }
   });

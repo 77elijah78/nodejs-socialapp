@@ -63,6 +63,11 @@ export interface ChatMessageEvent {
   thumbnailUrl?: string | null;
   type: string;
   createdAt: string;
+  repliedToId?: string | null;
+  repliedToContent?: string | null;
+  repliedToSenderId?: string | null;
+  repliedToSenderUsername?: string | null;
+  repliedToType?: string | null;
 }
 
 export interface NotificationEvent {

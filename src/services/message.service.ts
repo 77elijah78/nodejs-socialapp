@@ -97,6 +97,7 @@ export const messageService = {
               content: true,
               senderId: true,
               type: true,
+              sender: { select: { username: true, avatarUrl: true } },
             },
           },
         },
@@ -160,7 +161,13 @@ export const messageService = {
       include: {
         sender: { select: { id: true, username: true, avatarUrl: true } },
         repliedTo: {
-          select: { id: true, content: true, senderId: true, type: true },
+          select: {
+            id: true,
+            content: true,
+            senderId: true,
+            type: true,
+            sender: { select: { username: true, avatarUrl: true } },
+          },
         },
       },
     });
@@ -183,6 +190,11 @@ export const messageService = {
       thumbnailUrl: message.thumbnailUrl,
       type: message.type,
       createdAt: message.createdAt.toISOString(),
+      repliedToId: message.repliedToId,
+      repliedToContent: message.repliedTo?.content ?? null,
+      repliedToSenderId: message.repliedTo?.senderId ?? null,
+      repliedToSenderUsername: message.repliedTo?.sender?.username ?? null,
+      repliedToType: message.repliedTo?.type ?? null,
     });
 
     return message;
@@ -422,6 +434,11 @@ export const messageService = {
       thumbnailUrl: message.thumbnailUrl,
       type: message.type,
       createdAt: message.createdAt.toISOString(),
+      repliedToId: message.repliedToId,
+      repliedToContent: message.repliedTo?.content ?? null,
+      repliedToSenderId: message.repliedTo?.senderId ?? null,
+      repliedToSenderUsername: message.repliedTo?.sender?.username ?? null,
+      repliedToType: message.repliedTo?.type ?? null,
     });
 
     return message;
