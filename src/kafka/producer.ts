@@ -88,6 +88,8 @@ export interface PresenceEvent {
 export interface MessageReadEvent {
   conversationId: string;
   userId: string;
+  messageId?: string;
+  senderId: string;
   readAt: string;
 }
 
@@ -95,6 +97,7 @@ export interface MessageDeliveredEvent {
   conversationId: string;
   messageId: string;
   userId: string;
+  senderId: string;
   deliveredAt: string;
 }
 
