@@ -1,6 +1,7 @@
 node_modules
 dist
 .env
+.env.*
 *.log
 logs/
 .git
@@ -9,3 +10,8 @@ README.md
 docker
 k8s
 *.md
+.vscode
+.idea
+test
+coverage
+.nyc_output

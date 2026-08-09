@@ -8,24 +8,14 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 
-WORKDIR /app
-
-COPY package*.json ./
-RUN npm ci
-
-COPY tsconfig.json ./
-COPY prisma ./prisma
-COPY src ./src
-
+COPY . .
 RUN npm run db:generate
 RUN npm run build
 
 # ─── Stage 2: Production runner ───────────────────────────────────
 FROM node:22-alpine AS runner
 
-RUN apk add --no-cache vips
-
-WORKDIR /app
+RUN apk add --no-cache vips dumb-init
 
 WORKDIR /app
 
@@ -37,11 +27,10 @@ RUN addgroup -g 1001 -S nodejs && \
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY --from=builder /app/dist              ./dist
+COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY prisma ./prisma
 
-# Upload directory — will be overridden by volume mount in prod
 RUN mkdir -p uploads/images uploads/videos uploads/audio && \
     chown -R nodejs:nodejs uploads
 
@@ -49,8 +38,10 @@ USER nodejs
 
 EXPOSE 3000
 
-# uploads is mounted as a volume so files persist across deploys
 VOLUME ["/app/uploads"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3000/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1) })"
 
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "dist/index.js"]

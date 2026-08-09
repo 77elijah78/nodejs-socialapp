@@ -3,7 +3,7 @@ name: social-backend
 services:
   app:
     build:
-      context: ..
+      context: .
       dockerfile: Dockerfile
     command: node dist/index.js
     ports:
