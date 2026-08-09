@@ -108,6 +108,8 @@ export const messageService = {
       prisma.message.count({ where: { conversationId } }),
     ]);
 
+    const lastMessage = messages[messages.length - 1];
+
     // Mark read + publish Kafka event
     await prisma.conversationParticipant.update({
       where: { conversationId_userId: { conversationId, userId } },
@@ -117,6 +119,8 @@ export const messageService = {
     await kafkaEvents.messageRead({
       conversationId,
       userId,
+      messageId: lastMessage?.id,
+      senderId: lastMessage?.senderId,
       readAt: new Date().toISOString(),
     });
 
@@ -261,14 +265,13 @@ export const messageService = {
   },
 
   async markMessagesDelivered(messageIds: string[], userId: string) {
-    // Mark messages as DELIVERED where the current user is the receiver
     const messages = await prisma.message.findMany({
       where: {
         id: { in: messageIds },
         receiverId: userId,
         status: { in: ['SENT', 'SENDING'] },
       },
-      select: { id: true, conversationId: true },
+      select: { id: true, conversationId: true, senderId: true },
     });
 
     await prisma.message.updateMany({
@@ -277,7 +280,7 @@ export const messageService = {
         receiverId: userId,
         status: { in: ['SENT', 'SENDING'] },
       },
-      data: { status: 'DELIVERED' as any },
+      data: { status: 'DELIVERED' as any, deliveredAt: new Date() },
     });
 
     for (const msg of messages) {
@@ -285,9 +288,89 @@ export const messageService = {
         messageId: msg.id,
         conversationId: msg.conversationId,
         userId,
+        senderId: msg.senderId,
         deliveredAt: new Date().toISOString(),
       });
     }
+
+    return messages;
+  },
+
+  async markMessagesDeliveredByConversation(conversationId: string, userId: string) {
+    const messages = await prisma.message.findMany({
+      where: {
+        conversationId,
+        receiverId: userId,
+        status: { in: ['SENT', 'SENDING'] },
+      },
+      select: { id: true, conversationId: true, senderId: true },
+    });
+
+    if (messages.length === 0) {
+      return [];
+    }
+
+    await prisma.message.updateMany({
+      where: {
+        conversationId,
+        receiverId: userId,
+        status: { in: ['SENT', 'SENDING'] },
+      },
+      data: { status: 'DELIVERED' as any, deliveredAt: new Date() },
+    });
+
+    for (const msg of messages) {
+      await kafkaEvents.messageDelivered({
+        messageId: msg.id,
+        conversationId: msg.conversationId,
+        userId,
+        senderId: msg.senderId,
+        deliveredAt: new Date().toISOString(),
+      });
+    }
+
+    return messages;
+  },
+
+  async markAllMessagesDelivered(userId: string) {
+    const conversations = await prisma.conversationParticipant.findMany({
+      where: { userId, deletedAt: null },
+      select: { conversationId: true },
+    });
+
+    const conversationIds = conversations.map(c => c.conversationId);
+
+    const messages = await prisma.message.findMany({
+      where: {
+        conversationId: { in: conversationIds },
+        receiverId: userId,
+        status: { in: ['SENT', 'SENDING'] },
+      },
+      select: { id: true, conversationId: true, senderId: true },
+    });
+
+    if (messages.length === 0) {
+      return [];
+    }
+
+    await prisma.message.updateMany({
+      where: {
+        id: { in: messages.map(m => m.id) },
+      },
+      data: { status: 'DELIVERED' as any, deliveredAt: new Date() },
+    });
+
+    for (const msg of messages) {
+      await kafkaEvents.messageDelivered({
+        messageId: msg.id,
+        conversationId: msg.conversationId,
+        userId,
+        senderId: msg.senderId,
+        deliveredAt: new Date().toISOString(),
+      });
+    }
+
+    return messages;
   },
 
   async markMessagesRead(conversationId: string, userId: string) {
@@ -296,6 +379,17 @@ export const messageService = {
     });
     if (!participant) throw new ForbiddenError('Not a participant');
     if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
+
+    const unreadMessages = await prisma.message.findMany({
+      where: {
+        conversationId,
+        receiverId: userId,
+        isRead: false,
+      },
+      select: { id: true, senderId: true },
+      orderBy: { createdAt: 'desc' },
+      take: 1,
+    });
 
     await prisma.message.updateMany({
       where: {
@@ -311,11 +405,20 @@ export const messageService = {
       data: { lastReadAt: new Date() },
     });
 
-    await kafkaEvents.messageRead({
-      conversationId,
-      userId,
-      readAt: new Date().toISOString(),
-    });
+    for (const msg of unreadMessages) {
+      await kafkaEvents.messageRead({
+        conversationId,
+        userId,
+        messageId: msg.id,
+        senderId: msg.senderId,
+        readAt: new Date().toISOString(),
+      });
+    }
+
+    return {
+      lastReadMessageId: unreadMessages[0]?.id ?? null,
+      count: unreadMessages.length,
+    };
   },
 
   async forwardMessage(messageId: string, senderId: string, targetConversationId: string) {
