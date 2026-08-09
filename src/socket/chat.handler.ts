@@ -1,9 +1,7 @@
 import { Server } from 'socket.io';
 import { AuthenticatedSocket } from './index.js';
 import { messageService } from '../services/message.service.js';
-import { kafkaEvents } from '../kafka/producer.js';
 import { logger } from '../config/logger.js';
-import { prisma } from '../config/database.js';
 
 interface SendMessagePayload {
   conversationId: string;
@@ -154,13 +152,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Mark messages as read
   socket.on('message:read', async (payload: ReadPayload) => {
     try {
-      const result = await messageService.markMessagesRead(payload.conversationId, socket.userId);
-      
-      io.to(`conversation:${payload.conversationId}`).emit('message:read', {
-        conversationId: payload.conversationId,
-        userId: socket.userId,
-        messageId: result.lastReadMessageId,
-      });
+      await messageService.markMessagesRead(payload.conversationId, socket.userId);
     } catch (err) {
       logger.error('message:read error', err);
     }
@@ -169,22 +161,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Mark messages as delivered
   socket.on('message:delivered', async (payload: DeliveredPayload) => {
     try {
-      const messages = await messageService.markMessagesDelivered(payload.messageIds, socket.userId);
-      
-      for (const msg of messages) {
-        const message = await prisma.message.findUnique({
-          where: { id: msg.id },
-          select: { senderId: true },
-        });
-
-        if (message) {
-          io.to(`user:${message.senderId}`).emit('message:delivered', {
-            messageId: msg.id,
-            conversationId: msg.conversationId,
-            userId: socket.userId,
-          });
-        }
-      }
+      await messageService.markMessagesDelivered(payload.messageIds, socket.userId);
     } catch (err) {
       logger.error('message:delivered error', err);
     }
@@ -226,11 +203,6 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Join personal room for direct notifications
   socket.on('presence:join-personal', (_data: unknown, ack?: Function) => {
     socket.join(`user:${socket.userId}`);
-
-    messageService.markAllMessagesDelivered(socket.userId).catch((err) => {
-      logger.error('markAllMessagesDelivered error', err);
-    });
-
     ack?.({ success: true });
   });
 };

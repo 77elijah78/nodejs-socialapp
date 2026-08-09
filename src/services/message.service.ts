@@ -388,7 +388,6 @@ export const messageService = {
       },
       select: { id: true, senderId: true },
       orderBy: { createdAt: 'desc' },
-      take: 50,
     });
 
     await prisma.message.updateMany({
