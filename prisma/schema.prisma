@@ -200,6 +200,7 @@ model Message {
   receiver       User?         @relation("ReceivedMessages", fields: [receiverId], references: [id])
   conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   isRead         Boolean       @default(false) @map("is_read")
+  deliveredAt    DateTime?     @map("delivered_at")
   createdAt      DateTime      @default(now()) @map("created_at")
   updatedAt      DateTime      @updatedAt @map("updated_at")
   editedAt       DateTime?     @map("edited_at")
