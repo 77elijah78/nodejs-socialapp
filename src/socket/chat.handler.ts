@@ -33,6 +33,7 @@ interface TypingPayload {
 
 interface ReadPayload {
   conversationId: string;
+  messageId?: string;
 }
 
 interface DeliveredPayload {
@@ -68,12 +69,6 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
     socket.join(`conversation:${conversationId}`);
     logger.debug(`${socket.username} joined conversation:${conversationId}`);
 
-    // Mark messages as read when joining a conversation
-    messageService.markMessagesRead(conversationId, socket.userId).catch((err) => {
-      logger.error('markMessagesRead error', err);
-    });
-
-    // Mark pending messages as delivered when receiver comes online
     messageService.markMessagesDeliveredByConversation(conversationId, socket.userId).catch((err) => {
       logger.error('markMessagesDelivered error', err);
     });
@@ -152,7 +147,11 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Mark messages as read
   socket.on('message:read', async (payload: ReadPayload) => {
     try {
-      await messageService.markMessagesRead(payload.conversationId, socket.userId);
+      if (payload.messageId) {
+        await messageService.markMessageRead(payload.conversationId, socket.userId, payload.messageId);
+      } else {
+        await messageService.markMessagesRead(payload.conversationId, socket.userId);
+      }
     } catch (err) {
       logger.error('message:read error', err);
     }

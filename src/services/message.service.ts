@@ -420,6 +420,48 @@ export const messageService = {
     };
   },
 
+  async markMessageRead(conversationId: string, userId: string, messageId: string) {
+    const participant = await prisma.conversationParticipant.findUnique({
+      where: { conversationId_userId: { conversationId, userId } },
+    });
+    if (!participant) throw new ForbiddenError('Not a participant');
+    if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
+
+    const message = await prisma.message.findFirst({
+      where: {
+        id: messageId,
+        conversationId,
+        receiverId: userId,
+        isRead: false,
+      },
+      select: { id: true, senderId: true },
+    });
+
+    if (!message) {
+      return { read: false };
+    }
+
+    await prisma.message.update({
+      where: { id: messageId },
+      data: { isRead: true, status: 'READ' as any },
+    });
+
+    await prisma.conversationParticipant.update({
+      where: { conversationId_userId: { conversationId, userId } },
+      data: { lastReadAt: new Date() },
+    });
+
+    await kafkaEvents.messageRead({
+      conversationId,
+      userId,
+      messageId: message.id,
+      senderId: message.senderId,
+      readAt: new Date().toISOString(),
+    });
+
+    return { read: true };
+  },
+
   async forwardMessage(messageId: string, senderId: string, targetConversationId: string) {
     const original = await prisma.message.findUnique({
       where: { id: messageId },
