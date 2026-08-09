@@ -2,6 +2,8 @@ import { Consumer, EachMessagePayload } from 'kafkajs';
 import { Server } from 'socket.io';
 import { kafka, TOPICS } from '../config/kafka.js';
 import { logger } from '../config/logger.js';
+import { messageService } from '../services/message.service.js';
+import { isUserOnline } from '../socket/presence.handler.js';
 import type {
   ChatMessageEvent,
   NotificationEvent,
@@ -144,6 +146,12 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
       createdAt: event.createdAt,
       repliedTo: replyData,
     });
+
+    if (isUserOnline(event.receiverId)) {
+      messageService.markMessagesDelivered([event.messageId], event.receiverId).catch((err) => {
+        logger.error('Auto mark delivered error', err);
+      });
+    }
   }
 
   logger.debug(
@@ -152,7 +160,7 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
 }
 
 function handleMessageDelivered(io: Server, event: MessageDeliveredEvent): void {
-  io.to(`conversation:${event.conversationId}`).emit('message:delivered', {
+  io.to(`user:${event.senderId}`).emit('message:delivered', {
     messageId: event.messageId,
     conversationId: event.conversationId,
     userId: event.userId,
@@ -160,7 +168,7 @@ function handleMessageDelivered(io: Server, event: MessageDeliveredEvent): void 
   });
 
   logger.debug(
-    `[Kafka→WS] chat.delivered → conversation:${event.conversationId}`
+    `[Kafka→WS] chat.delivered → user:${event.senderId} message:${event.messageId}`
   );
 }
 
@@ -224,14 +232,17 @@ function handlePresence(io: Server, event: PresenceEvent): void {
 }
 
 function handleMessageRead(io: Server, event: MessageReadEvent): void {
-  io.to(`conversation:${event.conversationId}`).emit('message:read', {
-    conversationId: event.conversationId,
-    userId: event.userId,
-    readAt: event.readAt,
-  });
+  if (event.senderId) {
+    io.to(`user:${event.senderId}`).emit('message:read', {
+      conversationId: event.conversationId,
+      userId: event.userId,
+      messageId: event.messageId,
+      readAt: event.readAt,
+    });
+  }
 
   logger.debug(
-    `[Kafka→WS] message-read → conversation:${event.conversationId}`
+    `[Kafka→WS] message-read → user:${event.senderId} conversation:${event.conversationId}`
   );
 }
 
