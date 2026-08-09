@@ -3,7 +3,6 @@ import { Server } from 'socket.io';
 import { kafka, TOPICS } from '../config/kafka.js';
 import { logger } from '../config/logger.js';
 import { messageService } from '../services/message.service.js';
-import { isUserOnline } from '../socket/presence.handler.js';
 import type {
   ChatMessageEvent,
   NotificationEvent,
@@ -130,29 +129,27 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
     },
   });
 
-  if (event.receiverId) {
-    io.to(`user:${event.receiverId}`).emit('message:notification', {
-      id: event.messageId,
-      conversationId: event.conversationId,
-      senderId: event.senderId,
-      sender: {
-        username: event.senderUsername,
-        avatarUrl: event.senderAvatarUrl,
-      },
-      content: event.content,
-      mediaUrl: event.mediaUrl ?? null,
-      thumbnailUrl: event.thumbnailUrl ?? null,
-      type: event.type,
-      createdAt: event.createdAt,
-      repliedTo: replyData,
-    });
+    if (event.receiverId) {
+      io.to(`user:${event.receiverId}`).emit('message:notification', {
+        id: event.messageId,
+        conversationId: event.conversationId,
+        senderId: event.senderId,
+        sender: {
+          username: event.senderUsername,
+          avatarUrl: event.senderAvatarUrl,
+        },
+        content: event.content,
+        mediaUrl: event.mediaUrl ?? null,
+        thumbnailUrl: event.thumbnailUrl ?? null,
+        type: event.type,
+        createdAt: event.createdAt,
+        repliedTo: replyData,
+      });
 
-    if (isUserOnline(event.receiverId)) {
       messageService.markMessagesDelivered([event.messageId], event.receiverId).catch((err) => {
         logger.error('Auto mark delivered error', err);
       });
     }
-  }
 
   logger.debug(
     `[Kafka→WS] chat.messages → conversation:${event.conversationId}`
