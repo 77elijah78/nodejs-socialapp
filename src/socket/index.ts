@@ -61,10 +61,6 @@ export const initSocket = async (httpServer: HTTPServer): Promise<Server> => {
     // Auto-join personal room
     authSocket.join(`user:${authSocket.userId}`);
 
-    messageService.markAllMessagesDelivered(authSocket.userId).catch((err) => {
-      logger.error('markAllMessagesDelivered error', err);
-    });
-
     registerChatHandlers(io, authSocket);
     registerPresenceHandlers(io, authSocket);
 

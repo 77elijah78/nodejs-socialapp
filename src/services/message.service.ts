@@ -181,6 +181,10 @@ export const messageService = {
       data: { updatedAt: new Date() },
     });
 
+    if (!receiverId) {
+      throw new ValidationError('receiverId is required for chat messages');
+    }
+
     // 2. Publish to Kafka → consumer will emit via Socket.io
     await kafkaEvents.chatMessage({
       messageId: message.id,
@@ -565,6 +569,10 @@ export const messageService = {
       where: { id: conversationId },
       data: { updatedAt: new Date() },
     });
+
+    if (!receiverId) {
+      throw new ValidationError('receiverId is required for chat messages');
+    }
 
     await kafkaEvents.chatMessage({
       messageId: message.id,

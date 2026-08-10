@@ -102,6 +102,14 @@ async function routeEvent(io: Server, topic: string, payload: unknown): Promise<
 // ─── Handlers ─────────────────────────────────────────────────────
 
 function handleChatMessage(io: Server, event: ChatMessageEvent): void {
+  if (!event.receiverId) {
+    logger.error(`[Kafka→WS] chat.messages missing receiverId`, {
+      messageId: event.messageId,
+      conversationId: event.conversationId,
+    });
+    return;
+  }
+
   const replyData = event.repliedToId
     ? {
         id: event.repliedToId,
@@ -112,45 +120,48 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
       }
     : null;
 
-   io.to(`conversation:${event.conversationId}`).emit('message:new', {
-     id: event.messageId,
-     content: event.content,
-     conversationId: event.conversationId,
-     receiverId: event.receiverId,
-     mediaUrl: event.mediaUrl ?? null,
-     thumbnailUrl: event.thumbnailUrl ?? null,
-     type: event.type,
-     createdAt: event.createdAt,
-     repliedTo: replyData,
-     sender: {
-       id: event.senderId,
-       username: event.senderUsername,
-       avatarUrl: event.senderAvatarUrl,
-     },
-   });
+  const messagePayload = {
+    id: event.messageId,
+    messageId: event.messageId,
+    conversationId: event.conversationId,
+    senderId: event.senderId,
+    receiverId: event.receiverId,
+    content: event.content,
+    mediaUrl: event.mediaUrl ?? null,
+    thumbnailUrl: event.thumbnailUrl ?? null,
+    type: event.type,
+    createdAt: event.createdAt,
+    timestamp: new Date(event.createdAt).getTime(),
+    repliedTo: replyData,
+    sender: {
+      id: event.senderId,
+      username: event.senderUsername,
+      avatarUrl: event.senderAvatarUrl,
+    },
+  };
 
-   if (event.receiverId) {
-     io.to(`user:${event.receiverId}`).emit('message:notification', {
-       id: event.messageId,
-       conversationId: event.conversationId,
-       senderId: event.senderId,
-       sender: {
-         username: event.senderUsername,
-         avatarUrl: event.senderAvatarUrl,
-       },
-       content: event.content,
-       mediaUrl: event.mediaUrl ?? null,
-       thumbnailUrl: event.thumbnailUrl ?? null,
-       type: event.type,
-       createdAt: event.createdAt,
-       repliedTo: replyData,
-     });
-   }
+  io.to(`user:${event.receiverId}`).emit('message:new', messagePayload);
 
-   logger.debug(
-     `[Kafka→WS] chat.messages → conversation:${event.conversationId}`
-   );
- }
+  io.to(`user:${event.receiverId}`).emit('message:notification', {
+    id: event.messageId,
+    conversationId: event.conversationId,
+    senderId: event.senderId,
+    sender: {
+      username: event.senderUsername,
+      avatarUrl: event.senderAvatarUrl,
+    },
+    content: event.content,
+    mediaUrl: event.mediaUrl ?? null,
+    thumbnailUrl: event.thumbnailUrl ?? null,
+    type: event.type,
+    createdAt: event.createdAt,
+    repliedTo: replyData,
+  });
+
+  logger.debug(
+    `[Kafka→WS] chat.messages → user:${event.receiverId} message:${event.messageId}`
+  );
+}
 
 function handleMessageDelivered(io: Server, event: MessageDeliveredEvent): void {
   io.to(`user:${event.senderId}`).emit('message:delivered', {

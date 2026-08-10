@@ -57,7 +57,7 @@ export interface ChatMessageEvent {
   senderId: string;
   senderUsername: string;
   senderAvatarUrl: string | null;
-  receiverId?: string;
+  receiverId: string;
   content: string;
   mediaUrl?: string | null;
   thumbnailUrl?: string | null;
