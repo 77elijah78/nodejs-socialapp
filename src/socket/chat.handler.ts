@@ -68,10 +68,6 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   socket.on('conversation:join', (conversationId: string) => {
     socket.join(`conversation:${conversationId}`);
     logger.debug(`${socket.username} joined conversation:${conversationId}`);
-
-    messageService.markMessagesDeliveredByConversation(conversationId, socket.userId).catch((err) => {
-      logger.error('markMessagesDelivered error', err);
-    });
   });
 
   // Leave a conversation room

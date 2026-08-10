@@ -112,49 +112,45 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
       }
     : null;
 
-  io.to(`conversation:${event.conversationId}`).emit('message:new', {
-    id: event.messageId,
-    content: event.content,
-    conversationId: event.conversationId,
-    receiverId: event.receiverId,
-    mediaUrl: event.mediaUrl ?? null,
-    thumbnailUrl: event.thumbnailUrl ?? null,
-    type: event.type,
-    createdAt: event.createdAt,
-    repliedTo: replyData,
-    sender: {
-      id: event.senderId,
-      username: event.senderUsername,
-      avatarUrl: event.senderAvatarUrl,
-    },
-  });
+   io.to(`conversation:${event.conversationId}`).emit('message:new', {
+     id: event.messageId,
+     content: event.content,
+     conversationId: event.conversationId,
+     receiverId: event.receiverId,
+     mediaUrl: event.mediaUrl ?? null,
+     thumbnailUrl: event.thumbnailUrl ?? null,
+     type: event.type,
+     createdAt: event.createdAt,
+     repliedTo: replyData,
+     sender: {
+       id: event.senderId,
+       username: event.senderUsername,
+       avatarUrl: event.senderAvatarUrl,
+     },
+   });
 
-    if (event.receiverId) {
-      io.to(`user:${event.receiverId}`).emit('message:notification', {
-        id: event.messageId,
-        conversationId: event.conversationId,
-        senderId: event.senderId,
-        sender: {
-          username: event.senderUsername,
-          avatarUrl: event.senderAvatarUrl,
-        },
-        content: event.content,
-        mediaUrl: event.mediaUrl ?? null,
-        thumbnailUrl: event.thumbnailUrl ?? null,
-        type: event.type,
-        createdAt: event.createdAt,
-        repliedTo: replyData,
-      });
+   if (event.receiverId) {
+     io.to(`user:${event.receiverId}`).emit('message:notification', {
+       id: event.messageId,
+       conversationId: event.conversationId,
+       senderId: event.senderId,
+       sender: {
+         username: event.senderUsername,
+         avatarUrl: event.senderAvatarUrl,
+       },
+       content: event.content,
+       mediaUrl: event.mediaUrl ?? null,
+       thumbnailUrl: event.thumbnailUrl ?? null,
+       type: event.type,
+       createdAt: event.createdAt,
+       repliedTo: replyData,
+     });
+   }
 
-      messageService.markMessagesDelivered([event.messageId], event.receiverId).catch((err) => {
-        logger.error('Auto mark delivered error', err);
-      });
-    }
-
-  logger.debug(
-    `[Kafka→WS] chat.messages → conversation:${event.conversationId}`
-  );
-}
+   logger.debug(
+     `[Kafka→WS] chat.messages → conversation:${event.conversationId}`
+   );
+ }
 
 function handleMessageDelivered(io: Server, event: MessageDeliveredEvent): void {
   io.to(`user:${event.senderId}`).emit('message:delivered', {
