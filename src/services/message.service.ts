@@ -79,16 +79,38 @@ export const messageService = {
     });
   },
 
-  async getMessages(conversationId: string, userId: string, page: number, limit: number) {
+  async getMessages(
+    conversationId: string,
+    userId: string,
+    page: number,
+    limit: number,
+    cursorId?: string,
+    before?: number,
+  ) {
     const participant = await prisma.conversationParticipant.findUnique({
       where: { conversationId_userId: { conversationId, userId } },
     });
     if (!participant) throw new ForbiddenError('Not a participant in this conversation');
     if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
 
+    let cursorFilter: any = {};
+    if (cursorId) {
+      const cursorMessage = await prisma.message.findUnique({
+        where: { id: cursorId },
+        select: { createdAt: true },
+      });
+      if (cursorMessage) {
+        cursorFilter = { createdAt: { lt: cursorMessage.createdAt } };
+      }
+    } else if (before) {
+      cursorFilter = { createdAt: { lt: new Date(before) } };
+    }
+
+    const where: any = { conversationId, ...cursorFilter };
+
     const [messages, total] = await Promise.all([
       prisma.message.findMany({
-        where: { conversationId },
+        where,
         include: {
           sender: { select: { id: true, username: true, avatarUrl: true } },
           repliedTo: {
@@ -102,13 +124,14 @@ export const messageService = {
           },
         },
         orderBy: { createdAt: 'desc' },
-        skip: (page - 1) * limit,
+        skip: page > 1 && !cursorId && !before ? (page - 1) * limit : 0,
         take: limit,
       }),
-      prisma.message.count({ where: { conversationId } }),
+      prisma.message.count({ where }),
     ]);
 
     const lastMessage = messages[messages.length - 1];
+    const nextCursor = messages.length === limit ? messages[messages.length - 1]?.id : undefined;
 
     // Mark read + publish Kafka event
     await prisma.conversationParticipant.update({
@@ -124,7 +147,7 @@ export const messageService = {
       readAt: new Date().toISOString(),
     });
 
-    return { messages: messages.reverse(), total };
+    return { messages: messages.reverse(), total, nextCursor };
   },
 
   async sendMessage(
@@ -382,6 +405,14 @@ export const messageService = {
       where: {
         receiverId: userId,
         status: { in: ['SENT', 'SENDING'] },
+        conversation: {
+          participants: {
+            some: {
+              userId,
+              deletedAt: null,
+            },
+          },
+        },
       },
       select: {
         id: true,
