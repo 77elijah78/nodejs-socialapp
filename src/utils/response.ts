@@ -15,6 +15,7 @@ export interface PaginationMeta {
   totalPages: number;
   hasNext: boolean;
   hasPrev: boolean;
+  nextCursor?: string;
 }
 
 export const sendSuccess = <T>(
@@ -43,12 +44,14 @@ export const sendError = (
 export const buildPaginationMeta = (
   total: number,
   page: number,
-  limit: number
+  limit: number,
+  nextCursor?: string
 ): PaginationMeta => ({
   page,
   limit,
   total,
   totalPages: Math.ceil(total / limit),
-  hasNext: page * limit < total,
+  hasNext: nextCursor ? true : page * limit < total,
   hasPrev: page > 1,
+  ...(nextCursor ? { nextCursor } : {}),
 });

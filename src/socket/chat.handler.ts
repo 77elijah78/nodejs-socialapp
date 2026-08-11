@@ -156,7 +156,16 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Mark messages as delivered
   socket.on('message:delivered', async (payload: DeliveredPayload) => {
     try {
+      logger.info('[WS] delivery ACK received:', {
+        userId: socket.userId,
+        socketId: socket.id,
+        messageIds: payload.messageIds,
+        conversationId: payload.conversationId,
+      });
+
       await messageService.markMessagesDelivered(payload.messageIds, socket.userId);
+
+      logger.info('[WS] sender delivery receipt emitted via Kafka');
     } catch (err) {
       logger.error('message:delivered error', err);
     }

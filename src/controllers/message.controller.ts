@@ -51,6 +51,8 @@ export const messageController = {
     try {
       const { userId } = (req as AuthRequest).user;
       const { page, limit } = parsePagination(req.query);
+      const cursorId = req.query.cursorId ? getParamValue(req.query.cursorId as string | string[]) : undefined;
+      const before = req.query.before ? Number(req.query.before) : undefined;
 
       const conversationId = getParamValue(req.params.conversationId);
 
@@ -58,10 +60,10 @@ export const messageController = {
         return res.status(400).json({ error: 'Conversation ID is required' });
       }
 
-      const { messages, total } = await messageService.getMessages(
-        conversationId, userId, page, limit
+      const { messages, total, nextCursor } = await messageService.getMessages(
+        conversationId, userId, page, limit, cursorId, before
       );
-      sendSuccess(res, messages, 'Messages', 200, buildPaginationMeta(total, page, limit));
+      sendSuccess(res, messages, 'Messages', 200, buildPaginationMeta(total, page, limit, nextCursor));
     } catch (err) {
       next(err);
     }
@@ -132,6 +134,18 @@ export const messageController = {
 
       await messageService.markMessagesDelivered(messageIds, userId);
       sendSuccess(res, null, 'Messages marked as delivered');
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  async getPendingDeliveryMessages(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const limit = Number(req.query.limit ?? 50);
+
+      const messages = await messageService.getPendingDeliveryMessages(userId, limit);
+      sendSuccess(res, messages, 'Pending delivery messages', 200);
     } catch (err) {
       next(err);
     }
