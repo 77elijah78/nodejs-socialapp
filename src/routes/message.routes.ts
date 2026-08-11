@@ -37,6 +37,7 @@ router.delete(
 
 router.post('/conversations/:conversationId/read', messageController.markRead);
 router.post('/delivered', validate(markDeliveredSchema), messageController.markDelivered);
+router.get('/pending/delivery', messageController.getPendingDeliveryMessages);
 router.post('/messages/forward', validate(forwardMessageSchema), messageController.forwardMessage);
 
 export default router;

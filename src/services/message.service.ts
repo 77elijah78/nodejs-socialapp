@@ -377,6 +377,41 @@ export const messageService = {
     return messages;
   },
 
+  async getPendingDeliveryMessages(userId: string, limit = 50) {
+    const messages = await prisma.message.findMany({
+      where: {
+        receiverId: userId,
+        status: { in: ['SENT', 'SENDING'] },
+      },
+      select: {
+        id: true,
+        content: true,
+        mediaUrl: true,
+        thumbnailUrl: true,
+        type: true,
+        status: true,
+        senderId: true,
+        receiverId: true,
+        conversationId: true,
+        isRead: true,
+        createdAt: true,
+        editedAt: true,
+        deletedAt: true,
+        deletedBy: true,
+        duration: true,
+        repliedToId: true,
+        forwardedFromId: true,
+        sender: {
+          select: { id: true, username: true, avatarUrl: true },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+      take: limit,
+    });
+
+    return messages;
+  },
+
   async markMessagesRead(conversationId: string, userId: string) {
     const participant = await prisma.conversationParticipant.findUnique({
       where: { conversationId_userId: { conversationId, userId } },

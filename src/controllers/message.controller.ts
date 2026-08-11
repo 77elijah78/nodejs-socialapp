@@ -137,6 +137,18 @@ export const messageController = {
     }
   },
 
+  async getPendingDeliveryMessages(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const limit = Number(req.query.limit ?? 50);
+
+      const messages = await messageService.getPendingDeliveryMessages(userId, limit);
+      sendSuccess(res, messages, 'Pending delivery messages', 200);
+    } catch (err) {
+      next(err);
+    }
+  },
+
   async forwardMessage(req: Request, res: Response, next: NextFunction) {
     try {
       const { userId } = (req as AuthRequest).user;
