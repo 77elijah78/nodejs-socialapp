@@ -9,6 +9,7 @@ const router = Router();
 router.get('/feed', authenticate, postController.getFeed);
 router.get('/stories', authenticate, postController.getStories);
 router.get('/saved', authenticate, postController.getSaved);
+router.get('/liked', authenticate, postController.getLiked);
 router.get('/user/:username', optionalAuth, postController.getUserPosts);
 router.post('/', authenticate, validate(createPostSchema), postController.create);
 router.post('/stories', authenticate, validate(createStorySchema), postController.createStory);

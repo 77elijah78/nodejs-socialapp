@@ -25,6 +25,7 @@ export const refreshSchema = z.object({
 export const updateProfileSchema = z.object({
   body: z.object({
     displayName: z.string().max(60).optional(),
+    username: z.string().min(3).max(30).regex(/^[a-zA-Z0-9_]+$/, 'Only letters, numbers, underscores').optional(),
     bio: z.string().max(300).optional(),
     avatarUrl: z.string().url().optional(),
   }),
