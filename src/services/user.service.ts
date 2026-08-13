@@ -70,8 +70,18 @@ export const userService = {
 
   async updateProfile(
     userId: string,
-    data: { displayName?: string; bio?: string; avatarUrl?: string }
+    data: { displayName?: string; username?: string; bio?: string; avatarUrl?: string }
   ) {
+    if (data.username) {
+      const existing = await prisma.user.findUnique({
+        where: { username: data.username },
+        select: { id: true },
+      });
+      if (existing && existing.id !== userId) {
+        throw new ConflictError('Username is already taken');
+      }
+    }
+
     return prisma.user.update({
       where: { id: userId },
       data,
