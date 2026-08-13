@@ -195,6 +195,27 @@ export const postService = {
     return { posts: saved.map((s) => s.post), total };
   },
 
+  async getLikedPosts(userId: string, page: number, limit: number) {
+    const [liked, total] = await Promise.all([
+      prisma.like.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+        include: {
+          post: {
+            select: {
+              ...postSelect,
+            },
+          },
+        },
+      }),
+      prisma.like.count({ where: { userId } }),
+    ]);
+
+    return { posts: liked.map((l) => l.post), total };
+  },
+
   async getStories(userId: string) {
     const following = await prisma.follow.findMany({
       where: { followerId: userId },

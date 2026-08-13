@@ -147,6 +147,17 @@ export const postController = {
     }
   },
 
+  async getLiked(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const { page, limit } = parsePagination(req.query);
+      const { posts, total } = await postService.getLikedPosts(userId, page, limit);
+      sendSuccess(res, posts, "Liked posts", 200, buildPaginationMeta(total, page, limit));
+    } catch (err) {
+      next(err);
+    }
+  },
+
   async getUserPosts(req: Request, res: Response, next: NextFunction) {
     try {
       const username = typeof req.params.username === "string" ? req.params.username : req.params.username[0];
