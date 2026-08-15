@@ -27,8 +27,8 @@ async function bootstrap() {
   // 4. Kafka consumer (needs io reference to emit events)
   await connectConsumer(io);
 
-  httpServer.listen(PORT, () => {
-    logger.info(`🚀 Server running on http://localhost:${PORT}`);
+  httpServer.listen({ port: PORT, hostname: '0.0.0.0' }, () => {
+    logger.info(`🚀 Server running on http://0.0.0.0:${PORT}`);
     logger.info(`   ENV: ${process.env.NODE_ENV}`);
   });
 
