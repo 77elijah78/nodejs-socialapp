@@ -21,7 +21,7 @@ export const parsePagination = (query: PaginationQuery) => ({
 // SHARED DOMAIN TYPES (mirrored in Expo frontend src/types/index.ts)
 // ─────────────────────────────────────────────────────────────────────
 
-export type MessageType = 'TEXT' | 'IMAGE' | 'VIDEO' | 'AUDIO' | 'DOCUMENT';
+export type MessageType = 'TEXT' | 'IMAGE' | 'VIDEO' | 'AUDIO' | 'DOCUMENT' | 'SHARED_POST' | 'SHARED_STORY';
 export type MessageStatus = 'SENDING' | 'SENT' | 'DELIVERED' | 'READ';
 export type NotificationType = 'LIKE' | 'COMMENT' | 'FOLLOW' | 'MESSAGE' | 'MENTION' | 'SHARE';
 

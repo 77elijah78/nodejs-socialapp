@@ -178,6 +178,8 @@ enum MessageType {
   VIDEO
   AUDIO
   DOCUMENT
+  SHARED_POST
+  SHARED_STORY
 }
 
 enum MessageStatus {
