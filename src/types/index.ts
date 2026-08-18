@@ -23,7 +23,7 @@ export const parsePagination = (query: PaginationQuery) => ({
 
 export type MessageType = 'TEXT' | 'IMAGE' | 'VIDEO' | 'AUDIO' | 'DOCUMENT';
 export type MessageStatus = 'SENDING' | 'SENT' | 'DELIVERED' | 'READ';
-export type NotificationType = 'LIKE' | 'COMMENT' | 'FOLLOW' | 'MESSAGE' | 'MENTION';
+export type NotificationType = 'LIKE' | 'COMMENT' | 'FOLLOW' | 'MESSAGE' | 'MENTION' | 'SHARE';
 
 export interface User {
   id: string;
@@ -66,6 +66,7 @@ export interface Post {
   createdAt: Date;
   updatedAt: Date;
   deletedAt: Date | null;
+  shareCount: number;
   author?: User;
   likes?: Like[];
   comments?: Comment[];
@@ -243,4 +244,14 @@ export interface CreateStoryInput {
   mediaUrl: string;
   mediaType: string;
   caption?: string | null;
+}
+
+export interface SharePostInput {
+  postId: string;
+  conversationId: string;
+}
+
+export interface ShareStoryInput {
+  storyId: string;
+  conversationId: string;
 }

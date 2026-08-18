@@ -10,6 +10,7 @@ const postSelect = {
   updatedAt: true,
   author: { select: { id: true, username: true, displayName: true, avatarUrl: true, isVerified: true } },
   _count: { select: { likes: true, comments: true } },
+  shareCount: true,
 };
 
 const commentSelect = {
@@ -317,5 +318,54 @@ export const postService = {
       },
       update: {},
     });
+  },
+
+  async sharePost(postId: string, userId: string, conversationId: string) {
+    const post = await prisma.post.findUnique({
+      where: { id: postId, deletedAt: null },
+      select: { id: true, authorId: true, shareCount: true },
+    });
+    if (!post) throw new NotFoundError('Post');
+
+    if (post.authorId === userId) {
+      throw new ForbiddenError('Cannot share your own post');
+    }
+
+    await prisma.post.update({
+      where: { id: postId },
+      data: { shareCount: { increment: 1 } },
+    });
+
+    if (post.authorId !== userId) {
+      await prisma.notification.create({
+        data: {
+          type: 'SHARE',
+          content: 'shared your post',
+          userId: post.authorId,
+          actorId: userId,
+          resourceId: postId,
+        },
+      });
+    }
+
+    return { postId, shareCount: post.shareCount + 1 };
+  },
+
+  async shareStory(storyId: string, userId: string, conversationId: string) {
+    const story = await prisma.story.findUnique({
+      where: { id: storyId },
+      select: { id: true, userId: true, expiresAt: true },
+    });
+    if (!story) throw new NotFoundError('Story');
+
+    if (story.userId === userId) {
+      throw new ForbiddenError('Cannot share your own story');
+    }
+
+    if (story.expiresAt < new Date()) {
+      throw new ForbiddenError('Story has expired');
+    }
+
+    return { storyId };
   },
 };

@@ -136,3 +136,17 @@ export const createStorySchema = z.object({
     caption: z.string().max(200).optional(),
   }),
 });
+
+export const shareSchema = z.object({
+  body: z.object({
+    conversationId: z.string().uuid(),
+  }),
+  params: z.object({ id: z.string().uuid() }),
+});
+
+export const shareStorySchema = z.object({
+  body: z.object({
+    conversationId: z.string().uuid(),
+  }),
+  params: z.object({ storyId: z.string().uuid() }),
+});

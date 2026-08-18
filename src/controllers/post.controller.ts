@@ -200,4 +200,28 @@ export const postController = {
       next(err);
     }
   },
+
+  async share(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const postId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
+      const { conversationId } = req.body;
+      const result = await postService.sharePost(postId, userId, conversationId);
+      sendSuccess(res, result, 'Post shared', 201);
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  async shareStory(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const { storyId } = req.params;
+      const { conversationId } = req.body;
+      const result = await postService.shareStory(storyId as string, userId, conversationId);
+      sendSuccess(res, result, 'Story shared', 201);
+    } catch (err) {
+      next(err);
+    }
+  },
 };
