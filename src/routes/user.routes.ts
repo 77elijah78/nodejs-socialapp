@@ -13,5 +13,6 @@ router.post('/:username/follow', authenticate, userController.follow);
 router.delete('/:username/follow', authenticate, userController.unfollow);
 router.get('/:username/followers', userController.getFollowers);
 router.get('/:username/following', userController.getFollowing);
+router.get('/me/following', authenticate, userController.getMyFollowing);
 
 export default router;

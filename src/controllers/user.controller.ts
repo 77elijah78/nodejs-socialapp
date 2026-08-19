@@ -113,4 +113,15 @@ export const userController = {
       next(err);
     }
   },
+
+  async getMyFollowing(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const { page, limit } = parsePagination(req.query);
+      const { following, total } = await userService.getMyFollowing(userId, page, limit);
+      sendSuccess(res, following, 'Following', 200, buildPaginationMeta(total, page, limit));
+    } catch (err) {
+      next(err);
+    }
+  },
 };

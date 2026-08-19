@@ -159,4 +159,21 @@ export const userService = {
 
     return { following: following.map((f) => f.following), total };
   },
+
+  async getMyFollowing(userId: string, page: number, limit: number) {
+    const [following, total] = await Promise.all([
+      prisma.follow.findMany({
+        where: { followerId: userId },
+        include: {
+          following: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+        },
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.follow.count({ where: { followerId: userId } }),
+    ]);
+
+    return { following: following.map((f) => f.following), total };
+  },
 };
