@@ -46,10 +46,10 @@ data = json.loads(resp.read())
 if data["data"]:
     story = data["data"][0]
     print(f"Story mediaUrl: {story['mediaUrl']}")
-    # Check image access via 192.168.1.3
+    # Check image access via 192.168.1.2
     try:
         req = urllib.request.Request(story["mediaUrl"])
         resp = urllib.request.urlopen(req, timeout=10)
-        print(f"Story image accessible via 192.168.1.3: {resp.status} ({len(resp.read())} bytes)")
+        print(f"Story image accessible via 192.168.1.2: {resp.status} ({len(resp.read())} bytes)")
     except Exception as e:
         print(f"Story image NOT accessible: {e}")
