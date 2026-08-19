@@ -73,7 +73,7 @@ export interface ChatMessageEvent {
 export interface NotificationEvent {
   userId: string;
   actorId: string;
-  type: 'LIKE' | 'COMMENT' | 'FOLLOW' | 'MESSAGE' | 'MENTION';
+  type: 'LIKE' | 'COMMENT' | 'FOLLOW' | 'MESSAGE' | 'MENTION' | 'SHARE';
   content: string;
   resourceId?: string;
 }

@@ -1,5 +1,6 @@
 import { prisma } from '../config/database.js';
 import { NotFoundError, ForbiddenError, ConflictError } from '../utils/errors.js';
+import { kafkaEvents } from '../kafka/producer.js';
 
 const postSelect = {
   id: true,
@@ -336,17 +337,23 @@ export const postService = {
       data: { shareCount: { increment: 1 } },
     });
 
-    if (post.authorId !== userId) {
-      await prisma.notification.create({
-        data: {
-          type: 'SHARE',
-          content: 'shared your post',
-          userId: post.authorId,
-          actorId: userId,
-          resourceId: postId,
-        },
-      });
-    }
+    await prisma.notification.create({
+      data: {
+        type: 'SHARE',
+        content: 'shared your post',
+        userId: post.authorId,
+        actorId: userId,
+        resourceId: postId,
+      },
+    });
+
+    await kafkaEvents.notification({
+      userId: post.authorId,
+      actorId: userId,
+      type: 'SHARE',
+      content: 'shared your post',
+      resourceId: postId,
+    });
 
     return { postId, shareCount: post.shareCount + 1 };
   },
