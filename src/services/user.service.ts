@@ -176,4 +176,32 @@ export const userService = {
 
     return { following: following.map((f) => f.following), total };
   },
+
+  async getSuggestedUsers(userId: string, page: number, limit: number) {
+    const followingIds = await prisma.follow.findMany({
+      where: { followerId: userId },
+      select: { followingId: true },
+    });
+
+    const excludedIds = followingIds.map((f) => f.followingId).concat(userId);
+
+    const [users, total] = await Promise.all([
+      prisma.user.findMany({
+        where: {
+          id: { notIn: excludedIds },
+        },
+        select: { id: true, username: true, displayName: true, avatarUrl: true },
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.user.count({
+        where: {
+          id: { notIn: excludedIds },
+        },
+      }),
+    ]);
+
+    return { users, total };
+  },
 };

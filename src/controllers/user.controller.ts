@@ -124,4 +124,15 @@ export const userController = {
       next(err);
     }
   },
+
+  async getSuggestedUsers(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const { page, limit } = parsePagination(req.query);
+      const { users, total } = await userService.getSuggestedUsers(userId, page, limit);
+      sendSuccess(res, users, 'Suggested users', 200, buildPaginationMeta(total, page, limit));
+    } catch (err) {
+      next(err);
+    }
+  },
 };
