@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { postController } from '../controllers/post.controller.js';
 import { authenticate, optionalAuth } from '../middlewares/authenticate.js';
 import { validate } from '../middlewares/validate.js';
-import { commentSchema, createPostSchema, updatePostSchema, createStorySchema, shareSchema, shareStorySchema } from '../middlewares/schemas.js';
+import { commentSchema, createPostSchema, updatePostSchema, createStorySchema, shareSchema, shareStorySchema, reportPostSchema, shareToUserSchema } from '../middlewares/schemas.js';
 
 const router = Router();
 
@@ -23,6 +23,8 @@ router.post('/:id/save', authenticate, postController.save);
 router.delete('/:id/save', authenticate, postController.unsave);
 router.post('/:id/comments', authenticate, validate(commentSchema), postController.comment);
 router.post('/:id/share', authenticate, validate(shareSchema), postController.share);
+router.post('/:id/report', authenticate, validate(reportPostSchema), postController.report);
+router.post('/:id/share-to-user', authenticate, validate(shareToUserSchema), postController.shareToUser);
 router.post('/stories/:storyId/share', authenticate, validate(shareStorySchema), postController.shareStory);
 
 export default router;

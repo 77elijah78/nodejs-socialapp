@@ -35,6 +35,7 @@ model User {
   likes    Like[]
   comments Comment[]
   savedBy  SavedPost[]
+  reports  Report[] @relation("Reporter")
 
   // Messaging
   sentMessages     Message[] @relation("SentMessages")
@@ -98,6 +99,7 @@ model Post {
   likes     Like[]
   comments  Comment[]
   savedBy   SavedPost[]
+  reports   Report[]
 
   @@index([authorId])
   @@map("posts")
@@ -140,6 +142,34 @@ model SavedPost {
 
   @@id([userId, postId])
   @@map("saved_posts")
+}
+
+// ─────────────────────────────────────────────────────────────
+// POST REPORTS
+// ─────────────────────────────────────────────────────────────
+model Report {
+  id        String    @id @default(uuid())
+  postId    String    @map("post_id")
+  post      Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reporterId String   @map("reporter_id")
+  reporter  User      @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reason    String
+  details   String?
+  status    ReportStatus @default(PENDING) @map("status")
+  createdAt DateTime  @default(now()) @map("created_at")
+  reviewedAt DateTime? @map("reviewed_at")
+  reviewedBy String?  @map("reviewed_by")
+
+  @@index([postId])
+  @@index([reporterId])
+  @@map("reports")
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWED
+  DISMISSED
+  ACTION_TAKEN
 }
 
 // ─────────────────────────────────────────────────────────────

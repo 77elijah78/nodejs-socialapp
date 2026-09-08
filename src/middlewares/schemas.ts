@@ -150,3 +150,18 @@ export const shareStorySchema = z.object({
   }),
   params: z.object({ storyId: z.string().uuid() }),
 });
+
+export const reportPostSchema = z.object({
+  body: z.object({
+    reason: z.string().min(1).max(200),
+    details: z.string().max(1000).optional(),
+  }),
+  params: z.object({ id: z.string().uuid() }),
+});
+
+export const shareToUserSchema = z.object({
+  body: z.object({
+    username: z.string().min(1).max(30),
+  }),
+  params: z.object({ id: z.string().uuid() }),
+});

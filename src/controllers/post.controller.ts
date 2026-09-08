@@ -224,4 +224,28 @@ export const postController = {
       next(err);
     }
   },
+
+  async report(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const postId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
+      const { reason, details } = req.body;
+      const report = await postService.reportPost(postId, userId, reason, details);
+      sendSuccess(res, report, 'Post reported', 201);
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  async shareToUser(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userId } = (req as AuthRequest).user;
+      const postId = typeof req.params.id === 'string' ? req.params.id : req.params.id[0];
+      const { username } = req.body;
+      const result = await postService.sharePostToUser(postId, userId, username);
+      sendSuccess(res, result, 'Post shared to user', 201);
+    } catch (err) {
+      next(err);
+    }
+  },
 };

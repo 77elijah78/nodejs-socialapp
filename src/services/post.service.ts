@@ -1,6 +1,7 @@
 import { prisma } from '../config/database.js';
-import { NotFoundError, ForbiddenError, ConflictError } from '../utils/errors.js';
+import { NotFoundError, ForbiddenError, ConflictError, ValidationError } from '../utils/errors.js';
 import { kafkaEvents } from '../kafka/producer.js';
+import { messageService } from './message.service.js';
 
 const postSelect = {
   id: true,
@@ -374,5 +375,94 @@ export const postService = {
     }
 
     return { storyId };
+  },
+
+  async reportPost(postId: string, reporterId: string, reason: string, details?: string | null) {
+    const post = await prisma.post.findUnique({
+      where: { id: postId, deletedAt: null },
+      select: { id: true, authorId: true },
+    });
+    if (!post) throw new NotFoundError('Post');
+
+    if (post.authorId === reporterId) {
+      throw new ForbiddenError('Cannot report your own post');
+    }
+
+    const existing = await prisma.report.findFirst({
+      where: { postId, reporterId },
+    });
+    if (existing) {
+      throw new ConflictError('You have already reported this post');
+    }
+
+    const report = await prisma.report.create({
+      data: {
+        postId,
+        reporterId,
+        reason,
+        details: details ?? null,
+      },
+      select: {
+        id: true,
+        postId: true,
+        reason: true,
+        details: true,
+        status: true,
+        createdAt: true,
+      },
+    });
+
+    return report;
+  },
+
+  async sharePostToUser(postId: string, senderId: string, targetUsername: string) {
+    const post = await prisma.post.findUnique({
+      where: { id: postId, deletedAt: null },
+      select: { id: true, authorId: true, shareCount: true },
+    });
+    if (!post) throw new NotFoundError('Post');
+
+    const targetUser = await prisma.user.findUnique({
+      where: { username: targetUsername },
+      select: { id: true },
+    });
+    if (!targetUser) throw new NotFoundError('Target user not found');
+
+    if (targetUser.id === senderId) {
+      throw new ForbiddenError('Cannot share to yourself');
+    }
+
+    const conversation = await messageService.getOrCreateConversation(senderId, targetUser.id);
+
+    await prisma.post.update({
+      where: { id: postId },
+      data: { shareCount: { increment: 1 } },
+    });
+
+    await prisma.message.create({
+      data: {
+        content: post.id,
+        mediaUrl: null,
+        type: 'SHARED_POST',
+        status: 'SENT',
+        senderId,
+        receiverId: targetUser.id,
+        conversationId: conversation.id,
+      },
+    });
+
+    if (post.authorId !== senderId) {
+      await prisma.notification.create({
+        data: {
+          type: 'SHARE',
+          content: 'shared your post',
+          userId: post.authorId,
+          actorId: senderId,
+          resourceId: postId,
+        },
+      });
+    }
+
+    return { postId, shareCount: post.shareCount + 1, conversationId: conversation.id };
   },
 };
