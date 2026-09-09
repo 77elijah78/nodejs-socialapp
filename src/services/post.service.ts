@@ -79,6 +79,7 @@ export const postService = {
       select: {
         ...postSelect,
         comments: {
+          where: { deletedAt: null },
           select: {
             ...commentSelect,
           },
@@ -231,6 +232,7 @@ export const postService = {
       where: {
         userId: { in: userIds },
         expiresAt: { gt: new Date() },
+        deletedAt: null,
       },
       include: {
         user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
@@ -302,9 +304,9 @@ export const postService = {
   async markStoryViewed(viewerId: string, storyId: string) {
     const story = await prisma.story.findUnique({
       where: { id: storyId },
-      select: { userId: true },
+      select: { userId: true, deletedAt: true },
     });
-    if (!story) {
+    if (!story || story.deletedAt) {
        throw new NotFoundError("Story");
     }
     await prisma.storyView.upsert({
@@ -362,9 +364,9 @@ export const postService = {
   async shareStory(storyId: string, userId: string, conversationId: string) {
     const story = await prisma.story.findUnique({
       where: { id: storyId },
-      select: { id: true, userId: true, expiresAt: true },
+      select: { id: true, userId: true, expiresAt: true, deletedAt: true },
     });
-    if (!story) throw new NotFoundError('Story');
+    if (!story || story.deletedAt) throw new NotFoundError('Story');
 
     if (story.userId === userId) {
       throw new ForbiddenError('Cannot share your own story');
