@@ -1,4 +1,3 @@
-// prisma/schema.prisma
 generator client {
   provider = "prisma-client-js"
 }
@@ -9,22 +8,82 @@ datasource db {
 }
 
 // ─────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+  DELETED
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  ADMIN
+  MODERATOR
+  SUPPORT_AGENT
+  ANALYST
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWED
+  DISMISSED
+  ACTION_TAKEN
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT
+  SHARED_POST
+  SHARED_STORY
+}
+
+enum MessageStatus {
+  SENDING
+  SENT
+  DELIVERED
+  READ
+}
+
+enum NotificationType {
+  LIKE
+  COMMENT
+  FOLLOW
+  MESSAGE
+  MENTION
+  SHARE
+}
+
+// ─────────────────────────────────────────────────────────────
 // USER
 // ─────────────────────────────────────────────────────────────
 model User {
-  id           String   @id @default(uuid())
-  username     String   @unique
-  email        String   @unique
-  passwordHash String   @map("password_hash")
-  displayName  String?  @map("display_name")
-  bio          String?
-  avatarUrl    String?  @map("avatar_url")
-  isVerified   Boolean  @default(false) @map("is_verified")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  id              String        @id @default(uuid())
+  username        String        @unique
+  email           String        @unique
+  passwordHash    String        @map("password_hash")
+  displayName     String?       @map("display_name")
+  bio             String?
+  avatarUrl       String?       @map("avatar_url")
+  isVerified      Boolean       @default(false) @map("is_verified")
+  accountStatus   AccountStatus @default(ACTIVE) @map("account_status")
+  suspendedAt     DateTime?     @map("suspended_at")
+  suspendedReason String?       @map("suspended_reason")
+  bannedAt        DateTime?     @map("banned_at")
+  bannedReason    String?       @map("banned_reason")
+  deletedAt       DateTime?     @map("deleted_at")
+  lastActiveAt    DateTime?     @map("last_active_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
 
   // Auth
   refreshTokens RefreshToken[]
+  adminAccount  AdminAccount?
 
   // Social graph
   followers Follow[] @relation("Following")
@@ -49,6 +108,9 @@ model User {
   // Notifications
   notifications Notification[]
 
+  @@index([accountStatus])
+  @@index([createdAt])
+  @@index([lastActiveAt])
   @@map("users")
 }
 
@@ -78,6 +140,7 @@ model Follow {
   createdAt   DateTime @default(now()) @map("created_at")
 
   @@id([followerId, followingId])
+  @@index([followingId])
   @@map("follows")
 }
 
@@ -85,23 +148,26 @@ model Follow {
 // POSTS
 // ─────────────────────────────────────────────────────────────
 model Post {
-  id        String    @id @default(uuid())
-  content   String
-  imageUrls String[]  @map("image_urls")
-  videoUrl  String?   @map("video_url")
-  authorId  String    @map("author_id")
-  author    User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
-  shareCount Int      @default(0) @map("share_count")
+  id         String    @id @default(uuid())
+  content    String
+  imageUrls  String[]  @map("image_urls")
+  videoUrl   String?   @map("video_url")
+  authorId   String    @map("author_id")
+  author     User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  deletedAt  DateTime? @map("deleted_at")
+  deletedBy  String?   @map("deleted_by")
+  shareCount Int       @default(0) @map("share_count")
 
-  likes     Like[]
-  comments  Comment[]
-  savedBy   SavedPost[]
-  reports   Report[]
+  likes    Like[]
+  comments Comment[]
+  savedBy  SavedPost[]
+  reports  Report[]
 
   @@index([authorId])
+  @@index([createdAt])
+  @@index([deletedAt])
   @@map("posts")
 }
 
@@ -113,20 +179,27 @@ model Like {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@id([userId, postId])
+  @@index([postId])
+  @@index([createdAt])
   @@map("likes")
 }
 
 model Comment {
-  id         String    @id @default(uuid())
-  content    String
-  authorId   String    @map("author_id")
-  postId     String    @map("post_id")
-  author     User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  post       Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
-  createdAt  DateTime  @default(now()) @map("created_at")
-  repliedToId String?  @map("replied_to_id")
+  id          String    @id @default(uuid())
+  content     String
+  authorId    String    @map("author_id")
+  postId      String    @map("post_id")
+  author      User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  post        Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  repliedToId String?   @map("replied_to_id")
+  deletedAt   DateTime? @map("deleted_at")
+  deletedBy   String?   @map("deleted_by")
 
   @@index([postId])
+  @@index([authorId])
+  @@index([createdAt])
+  @@index([deletedAt])
   @@map("comments")
 }
 
@@ -148,44 +221,59 @@ model SavedPost {
 // POST REPORTS
 // ─────────────────────────────────────────────────────────────
 model Report {
-  id        String    @id @default(uuid())
-  postId    String    @map("post_id")
-  post      Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
-  reporterId String   @map("reporter_id")
-  reporter  User      @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
-  reason    String
-  details   String?
-  status    ReportStatus @default(PENDING) @map("status")
-  createdAt DateTime  @default(now()) @map("created_at")
-  reviewedAt DateTime? @map("reviewed_at")
-  reviewedBy String?  @map("reviewed_by")
+  id               String         @id @default(uuid())
+  postId           String         @map("post_id")
+  post             Post           @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reporterId       String         @map("reporter_id")
+  reporter         User           @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reason           String
+  details          String?
+  status           ReportStatus   @default(PENDING) @map("status")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  reviewedAt       DateTime?      @map("reviewed_at")
+  reviewedBy       String?        @map("reviewed_by")
+  assignedAdminId  String?        @map("assigned_admin_id")
+  assignedAdmin    AdminAccount?  @relation("AssignedReports", fields: [assignedAdminId], references: [id], onDelete: SetNull)
+  resolutionNote   String?        @map("resolution_note")
+  notes            ReportNote[]
 
   @@index([postId])
   @@index([reporterId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([assignedAdminId])
   @@map("reports")
 }
 
-enum ReportStatus {
-  PENDING
-  REVIEWED
-  DISMISSED
-  ACTION_TAKEN
+model ReportNote {
+  id             String       @id @default(uuid())
+  reportId       String       @map("report_id")
+  report         Report       @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  adminAccountId String       @map("admin_account_id")
+  adminAccount   AdminAccount @relation(fields: [adminAccountId], references: [id], onDelete: Cascade)
+  note           String
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  @@index([reportId])
+  @@index([createdAt])
+  @@map("report_notes")
 }
 
 // ─────────────────────────────────────────────────────────────
 // MESSAGING
 // ─────────────────────────────────────────────────────────────
 model Conversation {
-  id           String   @id @default(uuid())
-  isGroup      Boolean  @default(false) @map("is_group")
-  groupName    String?  @map("group_name")
-  groupAvatar  String?  @map("group_avatar")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  id          String   @id @default(uuid())
+  isGroup     Boolean  @default(false) @map("is_group")
+  groupName   String?  @map("group_name")
+  groupAvatar String?  @map("group_avatar")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
   participants ConversationParticipant[]
   messages     Message[]
 
+  @@index([updatedAt])
   @@map("conversations")
 }
 
@@ -199,56 +287,44 @@ model ConversationParticipant {
   deletedAt      DateTime?    @map("deleted_at")
 
   @@id([conversationId, userId])
+  @@index([userId])
   @@map("conversation_participants")
 }
 
-enum MessageType {
-  TEXT
-  IMAGE
-  VIDEO
-  AUDIO
-  DOCUMENT
-  SHARED_POST
-  SHARED_STORY
-}
-
-enum MessageStatus {
-  SENDING
-  SENT
-  DELIVERED
-  READ
-}
-
 model Message {
-  id             String        @id @default(uuid())
-  content        String
-  mediaUrl       String?       @map("media_url")
-  thumbnailUrl   String?       @map("thumbnail_url")
-  type           MessageType   @default(TEXT)
-  status         MessageStatus @default(SENT) @map("status")
-  senderId       String        @map("sender_id")
-  receiverId     String?       @map("receiver_id")
-  conversationId String        @map("conversation_id")
-  sender         User          @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
-  receiver       User?         @relation("ReceivedMessages", fields: [receiverId], references: [id])
-  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  isRead         Boolean       @default(false) @map("is_read")
-  deliveredAt    DateTime?     @map("delivered_at")
-  createdAt      DateTime      @default(now()) @map("created_at")
-  updatedAt      DateTime      @updatedAt @map("updated_at")
-  editedAt       DateTime?     @map("edited_at")
-  deletedAt      DateTime?     @map("deleted_at")
-  deletedBy      String?       @map("deleted_by")
-  duration       Float?        @map("duration")
-  repliedToId    String?       @map("replied_to_id")
-  repliedTo      Message?      @relation("Replies", fields: [repliedToId], references: [id])
-  replies        Message[]     @relation("Replies")
-  forwardedFromId String?      @map("forwarded_from_id")
-  forwardedFrom  Message?      @relation("Forwards", fields: [forwardedFromId], references: [id])
-  forwards       Message[]     @relation("Forwards")
+  id              String        @id @default(uuid())
+  content         String
+  mediaUrl        String?       @map("media_url")
+  thumbnailUrl    String?       @map("thumbnail_url")
+  type            MessageType   @default(TEXT)
+  status          MessageStatus @default(SENT) @map("status")
+  senderId        String        @map("sender_id")
+  receiverId      String?       @map("receiver_id")
+  conversationId  String        @map("conversation_id")
+  sender          User          @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver        User?         @relation("ReceivedMessages", fields: [receiverId], references: [id])
+  conversation    Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  isRead          Boolean       @default(false) @map("is_read")
+  deliveredAt     DateTime?     @map("delivered_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  editedAt        DateTime?     @map("edited_at")
+  deletedAt       DateTime?     @map("deleted_at")
+  deletedBy       String?       @map("deleted_by")
+  duration        Float?        @map("duration")
+  repliedToId     String?       @map("replied_to_id")
+  repliedTo       Message?      @relation("Replies", fields: [repliedToId], references: [id])
+  replies         Message[]     @relation("Replies")
+  forwardedFromId String?       @map("forwarded_from_id")
+  forwardedFrom   Message?      @relation("Forwards", fields: [forwardedFromId], references: [id])
+  forwards        Message[]     @relation("Forwards")
 
   @@index([conversationId])
   @@index([senderId])
+  @@index([receiverId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([type])
   @@index([repliedToId])
   @@index([forwardedFromId])
   @@map("messages")
@@ -258,18 +334,23 @@ model Message {
 // STORIES (Instagram-style)
 // ─────────────────────────────────────────────────────────────
 model Story {
-  id        String   @id @default(uuid())
-  userId    String   @map("user_id")
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  mediaUrl  String   @map("media_url")
-  mediaType String   @map("media_type")
-  caption   String?
-  createdAt DateTime @default(now()) @map("created_at")
-  expiresAt DateTime @map("expires_at")
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaUrl   String    @map("media_url")
+  mediaType  String    @map("media_type")
+  caption    String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  expiresAt  DateTime  @map("expires_at")
+  deletedAt  DateTime? @map("deleted_at")
+  removedBy  String?   @map("removed_by")
 
   views StoryView[]
 
   @@index([userId])
+  @@index([createdAt])
+  @@index([expiresAt])
+  @@index([deletedAt])
   @@map("stories")
 }
 
@@ -281,21 +362,13 @@ model StoryView {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@id([storyId, viewerId])
+  @@index([viewerId])
   @@map("story_views")
 }
 
 // ─────────────────────────────────────────────────────────────
 // NOTIFICATIONS
 // ─────────────────────────────────────────────────────────────
-enum NotificationType {
-  LIKE
-  COMMENT
-  FOLLOW
-  MESSAGE
-  MENTION
-  SHARE
-}
-
 model Notification {
   id         String           @id @default(uuid())
   type       NotificationType
@@ -309,4 +382,63 @@ model Notification {
 
   @@index([userId, isRead])
   @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────
+// ADMINISTRATION
+// ─────────────────────────────────────────────────────────────
+model AdminAccount {
+  id              String      @id @default(uuid())
+  userId          String      @unique @map("user_id")
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role            AdminRole   @default(MODERATOR)
+  permissions     String[]    @default([])
+  isActive        Boolean     @default(true) @map("is_active")
+  createdByUserId String?     @map("created_by_user_id")
+  disabledAt      DateTime?   @map("disabled_at")
+  lastLoginAt     DateTime?   @map("last_login_at")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+
+  auditLogs       AuditLog[]  @relation("AdminAuditLogs")
+  assignedReports Report[]    @relation("AssignedReports")
+  reportNotes     ReportNote[]
+  updatedSettings PlatformSetting[] @relation("UpdatedSettings")
+
+  @@index([role])
+  @@index([isActive])
+  @@map("admin_accounts")
+}
+
+model AuditLog {
+  id             String       @id @default(uuid())
+  adminAccountId String?      @map("admin_account_id")
+  adminAccount   AdminAccount? @relation("AdminAuditLogs", fields: [adminAccountId], references: [id], onDelete: SetNull)
+  action         String
+  targetType     String       @map("target_type")
+  targetId       String?      @map("target_id")
+  reason         String?
+  metadata       Json?
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  @@index([adminAccountId])
+  @@index([action])
+  @@index([targetType])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model PlatformSetting {
+  id               String       @id @default(uuid())
+  key              String       @unique
+  category         String
+  value            Json
+  description      String?
+  updatedByAdminId String?      @map("updated_by_admin_id")
+  updatedByAdmin   AdminAccount? @relation("UpdatedSettings", fields: [updatedByAdminId], references: [id], onDelete: SetNull)
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  @@index([category])
+  @@map("platform_settings")
 }
