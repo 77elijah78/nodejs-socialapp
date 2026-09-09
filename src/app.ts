@@ -3,12 +3,14 @@ import helmet from 'helmet';
 import cors from 'cors';
 import morgan from 'morgan';
 import path from 'path';
+import fs from 'fs';
 import { rateLimit } from 'express-rate-limit';
 import { errorHandler } from './middlewares/errorHandler.js';
 import { notFound } from './middlewares/notFound.js';
 import routes from './routes/index.js';
 import { logger } from './config/logger.js';
 import { ensureUploadDirs } from './middlewares/upload.js';
+import { maintenanceModeGuard } from './middlewares/maintenance.js';
 
 const app = express();
 
@@ -81,8 +83,20 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// ─── Maintenance mode guard for public API traffic ────────────────
+app.use(maintenanceModeGuard);
+
 // ─── API Routes ───────────────────────────────────────────────────
 app.use('/api/v1', routes);
+
+// ─── Admin SPA static assets ──────────────────────────────────────
+const adminDistPath = path.resolve('admin/dist');
+if (fs.existsSync(adminDistPath)) {
+  app.use('/admin', express.static(adminDistPath, { index: false }));
+  app.get(/^\/admin(?:\/.*)?$/, (_req, res) => {
+    res.sendFile(path.join(adminDistPath, 'index.html'));
+  });
+}
 
 // ─── Error handling ───────────────────────────────────────────────
 app.use(notFound);

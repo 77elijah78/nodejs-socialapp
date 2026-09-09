@@ -10,6 +10,8 @@ RUN npm ci
 
 COPY . .
 RUN npm run db:generate
+RUN npm --prefix admin ci
+RUN npm --prefix admin run build
 RUN npm run build
 
 # ─── Stage 2: Production runner ───────────────────────────────────
@@ -28,6 +30,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/admin/dist ./admin/dist
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY prisma ./prisma
 

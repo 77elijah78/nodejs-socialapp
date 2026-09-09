@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
+import { DEFAULT_ROLE_PERMISSIONS } from '../src/admin/permissions.js';
 
 const prisma = new PrismaClient();
 
@@ -31,6 +32,36 @@ async function main() {
       displayName: 'Bob Builder',
       bio: 'Building things one commit at a time 🔨',
       avatarUrl: 'https://i.pravatar.cc/150?u=bob',
+    },
+  });
+
+  const admin = await prisma.user.upsert({
+    where: { email: 'admin@example.com' },
+    update: { avatarUrl: 'https://i.pravatar.cc/150?u=admin' },
+    create: {
+      username: 'admin',
+      email: 'admin@example.com',
+      passwordHash,
+      displayName: 'Platform Admin',
+      bio: 'Operations and moderation account',
+      avatarUrl: 'https://i.pravatar.cc/150?u=admin',
+      isVerified: true,
+      lastActiveAt: new Date(),
+    },
+  });
+
+  await prisma.adminAccount.upsert({
+    where: { userId: admin.id },
+    update: {
+      role: 'SUPER_ADMIN',
+      permissions: DEFAULT_ROLE_PERMISSIONS.SUPER_ADMIN,
+      isActive: true,
+    },
+    create: {
+      userId: admin.id,
+      role: 'SUPER_ADMIN',
+      permissions: DEFAULT_ROLE_PERMISSIONS.SUPER_ADMIN,
+      isActive: true,
     },
   });
 

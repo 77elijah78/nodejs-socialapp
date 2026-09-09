@@ -7,12 +7,15 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "build:all": "npm run build && npm run admin:build",
     "start": "node dist/index.js",
     "lint": "eslint src/**/*.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "admin:dev": "npm --prefix admin install && npm --prefix admin run dev",
+    "admin:build": "npm --prefix admin ci && npm --prefix admin run build"
   },
   "dependencies": {
     "@prisma/client": "^6.8.2",

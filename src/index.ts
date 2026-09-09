@@ -7,6 +7,7 @@ import { prisma } from './config/database.js';
 import { ensureTopics } from './kafka/admin.js';
 import { connectProducer, disconnectProducer } from './kafka/producer.js';
 import { connectConsumer, disconnectConsumer } from './kafka/consumer.js';
+import { adminSettingsService } from './admin/settings.service.js';
 
 const PORT = process.env.PORT ?? 3000;
 
@@ -14,6 +15,7 @@ async function bootstrap() {
   // 1. Database
   await prisma.$connect();
   logger.info('✅ Database connected');
+  await adminSettingsService.ensureDefaults();
 
   // 2. Kafka topics + producer
   await ensureTopics();
