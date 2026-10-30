@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { Server } from 'socket.io';
 import { AuthenticatedSocket } from './index.js';
 import { messageService } from '../services/message.service.js';
@@ -33,7 +34,7 @@ interface TypingPayload {
 
 interface ReadPayload {
   conversationId: string;
-  messageId?: string;
+  messageId: string;
 }
 
 interface DeliveredPayload {
@@ -141,15 +142,14 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   });
 
   // Mark messages as read
-  socket.on('message:read', async (payload: ReadPayload) => {
+  socket.on('message:read', async (payload: ReadPayload, ack?: (result: object) => void) => {
     try {
-      if (payload.messageId) {
-        await messageService.markMessageRead(payload.conversationId, socket.userId, payload.messageId);
-      } else {
-        await messageService.markMessagesRead(payload.conversationId, socket.userId);
-      }
+      const input = z.object({ conversationId: z.string().uuid(), messageId: z.string().uuid() }).parse(payload);
+      await messageService.markMessageRead(input.conversationId, socket.userId, input.messageId);
+      if (typeof ack === 'function') ack({ success: true });
     } catch (err) {
       logger.error('message:read error', err);
+      if (typeof ack === 'function') ack({ success: false, error: (err as Error).message });
     }
   });
 

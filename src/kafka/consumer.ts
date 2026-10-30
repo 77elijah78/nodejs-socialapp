@@ -1,8 +1,8 @@
+import { z } from 'zod';
 import { Consumer, EachMessagePayload } from 'kafkajs';
 import { Server } from 'socket.io';
 import { kafka, TOPICS } from '../config/kafka.js';
 import { logger } from '../config/logger.js';
-import { messageService } from '../services/message.service.js';
 import type {
   ChatMessageEvent,
   NotificationEvent,
@@ -33,6 +33,7 @@ export async function connectConsumer(io: Server): Promise<void> {
     fromBeginning: false,
   });
 
+  consumer.on(consumer.events.GROUP_JOIN, () => io.local.emit('receipts:resync'));
   await consumer.run({
     eachBatchAutoResolve: true,
     eachMessage: async ({ topic, message }: EachMessagePayload) => {
@@ -43,6 +44,7 @@ export async function connectConsumer(io: Server): Promise<void> {
         await routeEvent(io, topic, payload);
       } catch (err) {
         logger.error(`Consumer error [${topic}]`, err);
+        throw err;
       }
     },
   });
@@ -56,7 +58,7 @@ export async function disconnectConsumer(): Promise<void> {
 
 // ─── Event router ─────────────────────────────────────────────────
 
-async function routeEvent(io: Server, topic: string, payload: unknown): Promise<void> {
+export async function routeEvent(io: Server, topic: string, payload: unknown): Promise<void> {
   switch (topic) {
     case TOPICS.CHAT_MESSAGES:
       handleChatMessage(io, payload as ChatMessageEvent);
@@ -126,6 +128,8 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
     conversationId: event.conversationId,
     senderId: event.senderId,
     receiverId: event.receiverId,
+    isGroup: event.isGroup,
+    readByMe: false,
     content: event.content,
     mediaUrl: event.mediaUrl ?? null,
     thumbnailUrl: event.thumbnailUrl ?? null,
@@ -235,19 +239,20 @@ function handlePresence(io: Server, event: PresenceEvent): void {
   logger.debug(`[Kafka→WS] presence → ${event.status} ${event.username}`);
 }
 
-function handleMessageRead(io: Server, event: MessageReadEvent): void {
-  if (event.senderId) {
-    io.to(`user:${event.senderId}`).emit('message:read', {
-      conversationId: event.conversationId,
-      userId: event.userId,
-      messageId: event.messageId,
-      readAt: event.readAt,
-    });
-  }
+const receiptEventSchema = z.object({
+  conversationId: z.string().uuid(), messageId: z.string().uuid(),
+  senderId: z.string().uuid(), userId: z.string().uuid(), readAt: z.string().datetime(),
+});
 
-  logger.debug(
-    `[Kafka→WS] message-read → user:${event.senderId} conversation:${event.conversationId}`
-  );
+export function handleMessageRead(io: Server, event: MessageReadEvent): void {
+  // Malformed receipt records fail processing; never silently commit their offset.
+  const receipt = receiptEventSchema.parse(event);
+  io.to([`user:${receipt.senderId}`, `user:${receipt.userId}`]).emit('message:read', {
+    conversationId: receipt.conversationId,
+    userId: receipt.userId,
+    messageId: receipt.messageId,
+    readAt: receipt.readAt,
+  });
 }
 
 function handleConversationDeleted(io: Server, event: ConversationDeletedEvent): void {

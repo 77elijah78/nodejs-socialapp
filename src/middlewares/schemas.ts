@@ -165,3 +165,7 @@ export const shareToUserSchema = z.object({
   }),
   params: z.object({ id: z.string().uuid() }),
 });
+
+export const syncReceiptsSchema = z.object({ body: z.object({
+  messageIds: z.array(z.string().uuid()).max(200),
+}) });

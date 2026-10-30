@@ -11,6 +11,11 @@ function getParamValue(param: string | string[]): string {
 }
 
 export const messageController = {
+  async syncReceipts(req: Request, res: Response, next: NextFunction) {
+    try {
+      sendSuccess(res, await messageService.syncReceipts((req as AuthRequest).user.userId, req.body.messageIds));
+    } catch (err) { next(err); }
+  },
   async getConversations(req: Request, res: Response, next: NextFunction) {
     try {
       const { userId } = (req as AuthRequest).user;

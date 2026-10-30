@@ -33,6 +33,14 @@ export const initSocket = async (httpServer: HTTPServer): Promise<Server> => {
   // ─── Redis adapter for horizontal scaling ─────────────────
   // Multiple pods can now share Socket.io rooms across instances
   io.adapter(createAdapter(pubClient, subClient));
+  for (const client of [pubClient, subClient]) {
+    let recovering = false;
+    client.on('reconnecting', () => { recovering = true; });
+    client.on('ready', () => {
+      if (recovering) io.local.emit('receipts:resync');
+      recovering = false;
+    });
+  }
   logger.info('✅ Socket.io Redis adapter attached');
 
   // ─── JWT Auth middleware ───────────────────────────────────
