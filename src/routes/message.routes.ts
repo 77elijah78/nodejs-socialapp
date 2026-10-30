@@ -2,11 +2,12 @@ import { Router } from 'express';
 import { messageController } from '../controllers/message.controller.js';
 import { authenticate } from '../middlewares/authenticate.js';
 import { validate } from '../middlewares/validate.js';
-import { sendMessageSchema, startConversationSchema, deleteConversationSchema, editMessageSchema, forwardMessageSchema, markDeliveredSchema, replyMessageSchema } from '../middlewares/schemas.js';
+import { syncReceiptsSchema, sendMessageSchema, startConversationSchema, deleteConversationSchema, forwardMessageSchema, markDeliveredSchema, replyMessageSchema } from '../middlewares/schemas.js';
 
 const router = Router();
 
 router.use(authenticate);
+router.post('/receipts/sync', validate(syncReceiptsSchema), messageController.syncReceipts);
 
 router.get('/conversations', messageController.getConversations);
 router.post('/conversations', validate(startConversationSchema), messageController.startConversation);

@@ -97,6 +97,7 @@ model User {
   reports  Report[] @relation("Reporter")
 
   // Messaging
+  messageReceipts MessageReceipt[]
   sentMessages     Message[] @relation("SentMessages")
   receivedMessages Message[] @relation("ReceivedMessages")
   conversations    ConversationParticipant[]
@@ -291,7 +292,31 @@ model ConversationParticipant {
   @@map("conversation_participants")
 }
 
+model MessageReceipt {
+  messageId String @map("message_id")
+  userId String @map("user_id")
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  readAt DateTime? @map("read_at")
+  deliveredAt DateTime? @map("delivered_at")
+  @@id([messageId, userId])
+  @@index([userId, readAt])
+  @@map("message_receipts")
+}
+
+model ReceiptOutbox {
+  id String @id @default(uuid())
+  payload Json
+  availableAt DateTime @default(now()) @map("available_at")
+  leaseUntil DateTime? @map("lease_until")
+  claimToken String? @map("claim_token")
+  attempts Int @default(0)
+  @@index([availableAt, leaseUntil])
+  @@map("receipt_outbox")
+}
+
 model Message {
+  receipts MessageReceipt[]
   id              String        @id @default(uuid())
   content         String
   mediaUrl        String?       @map("media_url")

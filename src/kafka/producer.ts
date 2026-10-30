@@ -58,6 +58,7 @@ export interface ChatMessageEvent {
   senderUsername: string;
   senderAvatarUrl: string | null;
   receiverId: string;
+  isGroup?: boolean;
   content: string;
   mediaUrl?: string | null;
   thumbnailUrl?: string | null;
@@ -88,7 +89,7 @@ export interface PresenceEvent {
 export interface MessageReadEvent {
   conversationId: string;
   userId: string;
-  messageId?: string;
+  messageId: string;
   senderId: string;
   readAt: string;
 }
