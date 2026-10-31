@@ -327,7 +327,7 @@ export const postService = {
   async sharePost(postId: string, userId: string, conversationId: string) {
     const post = await prisma.post.findUnique({
       where: { id: postId, deletedAt: null },
-      select: { id: true, authorId: true, shareCount: true },
+      select: { id: true, authorId: true, shareCount: true, content: true, imageUrls: true, videoUrl: true },
     });
     if (!post) throw new NotFoundError('Post');
 
@@ -420,7 +420,7 @@ export const postService = {
   async sharePostToUser(postId: string, senderId: string, targetUsername: string) {
     const post = await prisma.post.findUnique({
       where: { id: postId, deletedAt: null },
-      select: { id: true, authorId: true, shareCount: true },
+      select: { id: true, authorId: true, shareCount: true, content: true, imageUrls: true, videoUrl: true },
     });
     if (!post) throw new NotFoundError('Post');
 
@@ -441,16 +441,9 @@ export const postService = {
       data: { shareCount: { increment: 1 } },
     });
 
-    await prisma.message.create({
-      data: {
-        content: post.id,
-        mediaUrl: null,
-        type: 'SHARED_POST',
-        status: 'SENT',
-        senderId,
-        receiverId: targetUser.id,
-        conversationId: conversation.id,
-      },
+    await messageService.sendMessage(conversation.id, senderId, post.id, targetUser.id, {
+      type: 'SHARED_POST', sharedReference: { id: post.id, kind: 'post',
+        preview: { content: post.content, imageUrls: post.imageUrls, videoUrl: post.videoUrl } },
     });
 
     if (post.authorId !== senderId) {

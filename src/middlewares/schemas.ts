@@ -71,7 +71,11 @@ export const sendMessageSchema = z.object({
     mediaUrl: z.string().url().optional(),
     thumbnailUrl: z.string().url().optional(),
     type: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT', 'SHARED_POST', 'SHARED_STORY']).optional(),
-    duration: z.number().optional(),
+    duration: z.number().nonnegative().optional(),
+    fileName: z.string().max(255).optional(),
+    fileMimeType: z.string().max(255).optional(),
+    fileSize: z.number().int().nonnegative().max(2147483647).optional(),
+    sharedReference: z.record(z.unknown()).optional(),
     repliedToId: z.string().uuid().optional(),
     receiverId: z.string().uuid().optional(),
   }).refine(
@@ -112,7 +116,11 @@ export const replyMessageSchema = z.object({
     mediaUrl: z.string().url().optional(),
     thumbnailUrl: z.string().url().optional(),
     type: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT', 'SHARED_POST', 'SHARED_STORY']).optional(),
-    duration: z.number().optional(),
+    duration: z.number().nonnegative().optional(),
+    fileName: z.string().max(255).optional(),
+    fileMimeType: z.string().max(255).optional(),
+    fileSize: z.number().int().nonnegative().max(2147483647).optional(),
+    sharedReference: z.record(z.unknown()).optional(),
     repliedToId: z.string().uuid(),
     receiverId: z.string().uuid().optional(),
   }).refine(
@@ -169,3 +177,9 @@ export const shareToUserSchema = z.object({
 export const syncReceiptsSchema = z.object({ body: z.object({
   messageIds: z.array(z.string().uuid()).max(200),
 }) });
+
+export const batchDeletePayload = z.object({
+  conversationId: z.string().uuid(), messageIds: z.array(z.string().uuid()).min(1).max(200),
+  deleteFor: z.enum(['me', 'everyone']),
+});
+export const batchDeleteSchema = z.object({ body: batchDeletePayload });

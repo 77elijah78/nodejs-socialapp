@@ -1,13 +1,15 @@
+import { z } from 'zod';
+import { messageInclude, serializeMessage } from './message.dto.js';
 import { prisma } from '../config/database.js';
 import { NotFoundError, ForbiddenError, ValidationError } from '../utils/errors.js';
 import { kafkaEvents } from '../kafka/producer.js';
 import { logger } from '../config/logger.js';
 import { publishReceipts } from './receipt-outbox.service.js';
-import type { MessageType, Prisma } from '@prisma/client';
+import { Prisma, type MessageType } from '@prisma/client';
 
 
 function eligible(userId: string) {
-  return { senderId: { not: userId }, deletedAt: null,
+  return { deletions: { none: { userId } }, senderId: { not: userId }, deletedAt: null,
     conversation: { participants: { some: { userId, deletedAt: null } } },
     OR: [{ receiverId: userId }, { conversation: { isGroup: true } }],
   };
@@ -26,12 +28,12 @@ async function recipientsFor(conversationId: string, senderId: string, receiverI
     (!conversation.isGroup && recipients.length !== 1)) throw new ValidationError('Invalid recipients');
   return { recipients, isGroup: conversation.isGroup };
 }
-async function receiptDTOs<T extends { id: string; conversationId: string }>(messages: T[], userId: string) {
+async function receiptDTOs<T extends { id: string; conversationId: string; deletedAt?: Date | null }>(messages: T[], userId: string) {
   const [receipts, conversations] = await Promise.all([
     prisma.messageReceipt.findMany({ where: { userId, messageId: { in: messages.map(m => m.id) } } }),
     prisma.conversation.findMany({ where: { id: { in: messages.map(m => m.conversationId) } }, select: { id: true, isGroup: true } }),
   ]);
-  return messages.map(m => ({ ...m, isGroup: conversations.find(c => c.id === m.conversationId)?.isGroup ?? false,
+  return messages.map(m => ({ ...serializeMessage(m), isGroup: conversations.find(c => c.id === m.conversationId)?.isGroup ?? false,
     readByMe: !!receipts.find(r => r.messageId === m.id)?.readAt }));
 }
 
@@ -105,13 +107,13 @@ export const messageService = {
             user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
           },
         },
-        messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1 },
+        messages: { where: { deletions: { none: { userId } } }, include: messageInclude, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1 },
       },
       orderBy: { updatedAt: 'desc' },
     });
-    return Promise.all(conversations.map(async conversation => ({ ...conversation,
+    return Promise.all(conversations.map(async conversation => ({ ...conversation, messages: conversation.messages.map(serializeMessage),
       unreadCount: await prisma.messageReceipt.count({ where: { userId, readAt: null,
-        message: { conversationId: conversation.id, deletedAt: null } } }),
+        message: { conversationId: conversation.id, deletedAt: null, deletions: { none: { userId } } } } }),
     })));
   },
 
@@ -142,23 +144,12 @@ export const messageService = {
       cursorFilter = { createdAt: { lt: new Date(before) } };
     }
 
-    const where: Prisma.MessageWhereInput = { conversationId, ...cursorFilter };
+    const where: Prisma.MessageWhereInput = { conversationId, deletions: { none: { userId } }, ...cursorFilter };
 
     const [messages, total] = await Promise.all([
       prisma.message.findMany({
         where,
-        include: {
-          sender: { select: { id: true, username: true, avatarUrl: true } },
-          repliedTo: {
-            select: {
-              id: true,
-              content: true,
-              senderId: true,
-              type: true,
-              sender: { select: { username: true, avatarUrl: true } },
-            },
-          },
-        },
+        include: messageInclude,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: page > 1 && !cursorId && !before ? (page - 1) * limit : 0,
         take: limit,
@@ -183,6 +174,10 @@ export const messageService = {
       duration?: number | null;
       repliedToId?: string | null;
       forwardedFromId?: string | null;
+      fileName?: string | null;
+      fileMimeType?: string | null;
+      fileSize?: number | null;
+      sharedReference?: Prisma.InputJsonValue;
     }
   ) {
     const participant = await prisma.conversationParticipant.findUnique({
@@ -192,10 +187,18 @@ export const messageService = {
     if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
 
     const { recipients, isGroup } = await recipientsFor(conversationId, senderId, receiverId);
+    if (options?.repliedToId) {
+      const original = await prisma.message.findUnique({ where: { id: options.repliedToId }, select: { conversationId: true } });
+      if (!original || original.conversationId !== conversationId) throw new ValidationError('Invalid reply target');
+    }
+    // Message, receipts and publication intents commit together.
+    const result = await prisma.$transaction(async tx => {
     // 1. Persist to PostgreSQL
-    const message = await prisma.message.create({
+    const message = await tx.message.create({
       data: {
-        content,
+        content: content ?? '',
+        fileName: options?.fileName, fileMimeType: options?.fileMimeType,
+        fileSize: options?.fileSize, sharedReference: options?.sharedReference,
         mediaUrl: options?.mediaUrl ?? null,
         thumbnailUrl: options?.thumbnailUrl ?? null,
         type: options?.type ?? 'TEXT',
@@ -208,28 +211,18 @@ export const messageService = {
         forwardedFromId: options?.forwardedFromId ?? null,
         receipts: { create: recipients.map(userId => ({ userId })) },
       },
-      include: {
-        sender: { select: { id: true, username: true, avatarUrl: true } },
-        repliedTo: {
-          select: {
-            id: true,
-            content: true,
-            senderId: true,
-            type: true,
-            sender: { select: { username: true, avatarUrl: true } },
-          },
-        },
-      },
+      include: messageInclude,
     });
 
-    await prisma.conversation.update({
+    await tx.conversation.update({
       where: { id: conversationId },
       data: { updatedAt: new Date() },
     });
 
 
     // 2. Publish to Kafka → consumer will emit via Socket.io
-    for (const recipientId of recipients) await kafkaEvents.chatMessage({
+    for (const recipientId of recipients) await tx.receiptOutbox.create({ data: { payload: JSON.parse(JSON.stringify({ kind: 'chatMessage', event: {
+      message: { ...serializeMessage(message), isGroup, readByMe: false },
       messageId: message.id,
       conversationId,
       senderId,
@@ -247,14 +240,19 @@ export const messageService = {
       repliedToSenderId: message.repliedTo?.senderId ?? null,
       repliedToSenderUsername: message.repliedTo?.sender?.username ?? null,
       repliedToType: message.repliedTo?.type ?? null,
-    });
+    } })) } });
 
-    return { ...message, isGroup, readByMe: false };
+    return { ...serializeMessage(message), isGroup, readByMe: false };
+    });
+    await publishReceipts().catch(error => logger.error('Message outbox will retry', error));
+    return result;
   },
 
   async editMessage(messageId: string, userId: string, newContent: string) {
     const message = await prisma.message.findUnique({ where: { id: messageId } });
     if (!message) throw new NotFoundError('Message');
+    await requireMember(message.conversationId, userId);
+    if (message.deletedAt) throw new ValidationError('Cannot edit deleted message');
     if (message.senderId !== userId) throw new ForbiddenError('Cannot edit someone else\'s message');
 
     const updated = await prisma.message.update({
@@ -276,40 +274,52 @@ export const messageService = {
     return updated;
   },
 
-  async deleteMessage(messageId: string, userId: string, deleteFor: 'me' | 'everyone') {
-    const message = await prisma.message.findUnique({ where: { id: messageId } });
-    if (!message) throw new NotFoundError('Message');
-    if (message.senderId !== userId) throw new ForbiddenError('Cannot delete someone else\'s message');
+  async requireMember(conversationId: string, userId: string) { await requireMember(conversationId, userId); },
 
-    const now = new Date();
+  async deleteMessage(messageId: string, userId: string, deleteFor: 'me' | 'everyone', conversationId?: string) {
+    z.enum(['me', 'everyone']).parse(deleteFor);
+    const result = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM messages WHERE id=${messageId} FOR UPDATE`;
+      const message = await tx.message.findUnique({ where: { id: messageId } });
+      if (!message) throw new NotFoundError('Message');
+      if (conversationId && message.conversationId !== conversationId) throw new ValidationError('Message is not in conversation');
+      const member = await tx.conversationParticipant.findUnique({ where: {
+        conversationId_userId: { conversationId: message.conversationId, userId },
+      } });
+      if (!member || member.deletedAt) throw new ForbiddenError('Not an active participant');
+      const now = new Date();
+      let event;
+      let kind;
+      if (deleteFor === 'everyone') {
+        if (message.senderId !== userId) throw new ForbiddenError('Only the sender can delete for everyone');
+        if (!message.deletedAt) await tx.message.update({ where: { id: messageId }, data: {
+          content: '', mediaUrl: null, thumbnailUrl: null, duration: null, fileName: null,
+          fileMimeType: null, fileSize: null, sharedReference: Prisma.JsonNull,
+          deletedAt: now, deletedBy: userId,
+        } });
+        kind = 'messageDeleted';
+        event = { messageId, conversationId: message.conversationId, deletedAt: (message.deletedAt ?? now).toISOString(), deletedBy: userId };
+      } else {
+        await tx.messageDeletion.upsert({ where: { messageId_userId: { messageId, userId } },
+          create: { messageId, userId }, update: {} });
+        kind = 'messageDeletedForMe';
+        event = { messageId, conversationId: message.conversationId, userId };
+      }
+      await tx.receiptOutbox.create({ data: { payload: { kind, event } } });
+      return { messageId, deleteFor };
+    });
+    await publishReceipts().catch(error => logger.error('Deletion outbox will retry', error));
+    return result;
+  },
 
-    if (deleteFor === 'everyone') {
-      // Hard delete for everyone — replace content with tombstone
-      await prisma.message.update({
-        where: { id: messageId },
-        data: {
-          content: '',
-          mediaUrl: null,
-          deletedAt: now,
-          deletedBy: userId,
-        },
-      });
-      await kafkaEvents.messageDeleted({
-        messageId,
-        conversationId: message.conversationId,
-        deletedAt: now.toISOString(),
-        deletedBy: userId,
-      });
-    } else {
-      // Soft-delete for sender only — keep in DB but notify client
-      await kafkaEvents.messageDeletedForMe({
-        messageId,
-        conversationId: message.conversationId,
-        userId,
-      });
+  async deleteMessages(conversationId: string, userId: string, messageIds: string[], deleteFor: 'me' | 'everyone') {
+    await requireMember(conversationId, userId);
+    const results = [];
+    for (const messageId of [...new Set(messageIds)]) {
+      try { results.push({ ...await this.deleteMessage(messageId, userId, deleteFor, conversationId), success: true }); }
+      catch (error) { results.push({ messageId, success: false, error: (error as Error).message }); }
     }
-
-    return { messageId, deleteFor };
+    return { conversationId, deleteFor, results };
   },
 
   async markMessagesDelivered(messageIds: string[], userId: string) {
@@ -325,11 +335,12 @@ export const messageService = {
       await tx.messageReceipt.updateMany({ where: {
         messageId: { in: messages.map(m => m.id) }, userId, readAt: null, deliveredAt: null,
       }, data: { deliveredAt: now } });
+      for (const msg of messages) await tx.receiptOutbox.create({ data: { payload: {
+        kind: 'messageDelivered', event: { messageId: msg.id, conversationId: msg.conversationId,
+          senderId: msg.senderId, userId, deliveredAt: now.toISOString() },
+      } } });
     });
-    for (const msg of messages) await kafkaEvents.messageDelivered({
-      messageId: msg.id, conversationId: msg.conversationId, senderId: msg.senderId,
-      userId, deliveredAt: now.toISOString(),
-    });
+    await publishReceipts().catch(error => logger.error('Delivery outbox will retry', error));
     return messages;
   },
 
@@ -343,7 +354,7 @@ export const messageService = {
   async getPendingDeliveryMessages(userId: string, limit = 50) {
     const messages = await prisma.message.findMany({ where: {
       ...eligible(userId), receipts: { some: { userId, deliveredAt: null, readAt: null } },
-    }, include: { sender: { select: { id: true, username: true, avatarUrl: true } } },
+    }, include: messageInclude,
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     take: Number.isFinite(limit) ? Math.max(1, Math.min(200, Math.trunc(limit))) : 50 });
     return receiptDTOs(messages, userId);
@@ -351,10 +362,10 @@ export const messageService = {
 
   async syncReceipts(userId: string, messageIds: string[]) {
     const messages = await prisma.message.findMany({ where: {
-      id: { in: messageIds }, senderId: userId, deletedAt: null,
+      id: { in: messageIds }, senderId: userId, deletions: { none: { userId } },
       conversation: { participants: { some: { userId, deletedAt: null } } },
-    }, select: { id: true, conversationId: true, status: true } });
-    return messages.map(({ id, ...rest }) => ({ messageId: id, ...rest }));
+    }, select: { id: true, conversationId: true, status: true, deletedAt: true, deletedBy: true } });
+    return messages.map(({ id, deletedAt, deletedBy, ...rest }) => ({ messageId: id, ...rest, ...(deletedAt ? { deletedAt, deletedBy } : {}) }));
   },
 
   // Explicit bulk action only; never invoked by visibility or history fetching.
@@ -383,6 +394,7 @@ export const messageService = {
       const key = { messageId_userId: { messageId, userId } };
       await tx.messageReceipt.updateMany({ where: { messageId, userId, readAt: null },
         data: { readAt: new Date() } });
+      await tx.messageReceipt.updateMany({ where: { messageId, userId, deliveredAt: null }, data: { deliveredAt: new Date() } });
       const receipt = await tx.messageReceipt.findUniqueOrThrow({ where: key });
       await tx.message.update({ where: { id: messageId }, data: { status: 'READ', isRead: true } });
       const payload = { conversationId, messageId, userId, senderId: message.senderId,
@@ -416,6 +428,8 @@ export const messageService = {
     return this.sendMessage(targetConversationId, senderId, original.content, recipients[0], {
       mediaUrl: original.mediaUrl, thumbnailUrl: original.thumbnailUrl,
       type: original.type, duration: original.duration, forwardedFromId: original.id,
+      fileName: original.fileName, fileMimeType: original.fileMimeType, fileSize: original.fileSize,
+      sharedReference: original.sharedReference as Prisma.InputJsonValue ?? undefined,
     });
   },
 

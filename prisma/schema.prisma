@@ -97,6 +97,7 @@ model User {
   reports  Report[] @relation("Reporter")
 
   // Messaging
+  messageDeletions MessageDeletion[]
   messageReceipts MessageReceipt[]
   sentMessages     Message[] @relation("SentMessages")
   receivedMessages Message[] @relation("ReceivedMessages")
@@ -315,7 +316,23 @@ model ReceiptOutbox {
   @@map("receipt_outbox")
 }
 
+model MessageDeletion {
+  messageId String @map("message_id")
+  userId String @map("user_id")
+  deletedAt DateTime @default(now()) @map("deleted_at")
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([messageId, userId])
+  @@index([userId, deletedAt])
+  @@map("message_deletions")
+}
+
 model Message {
+  deletions MessageDeletion[]
+  fileName String? @map("file_name")
+  fileMimeType String? @map("file_mime_type")
+  fileSize Int? @map("file_size")
+  sharedReference Json? @map("shared_reference")
   receipts MessageReceipt[]
   id              String        @id @default(uuid())
   content         String
@@ -344,6 +361,7 @@ model Message {
   forwardedFrom   Message?      @relation("Forwards", fields: [forwardedFromId], references: [id])
   forwards        Message[]     @relation("Forwards")
 
+  @@index([conversationId, createdAt, id])
   @@index([conversationId])
   @@index([senderId])
   @@index([receiverId])

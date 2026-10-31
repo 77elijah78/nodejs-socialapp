@@ -38,7 +38,7 @@ pool.connect = async () => Object.assign(new EventEmitter(), { query, release() 
 const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
 const events = [];
 let kafkaFails = false;
-const kafkaEvents = Object.fromEntries(['messageRead','messageDelivered','chatMessage','conversationDeleted'].map(name => [name, async payload => {
+const kafkaEvents = Object.fromEntries(['messageRead','messageDelivered','chatMessage','messageDeleted','messageDeletedForMe','conversationDeleted'].map(name => [name, async payload => {
   if (kafkaFails) throw Error('Kafka unavailable');
   events.push({ name, payload });
 }]));
@@ -245,3 +245,61 @@ test('additive migration backfills identifiable legacy DM, not fictional group r
   assert.equal(groupReceipts.length,2);assert.ok(groupReceipts.every(r=>r.readAt===null));
 });
 after(async()=>{await prisma.$disconnect();await pool.end();await db.close();});
+
+for (const type of ['TEXT','IMAGE','VIDEO','AUDIO','DOCUMENT','SHARED_POST','SHARED_STORY']) {
+  test(`complete ${type} reply across history, send and Kafka`, async () => {
+    const dm = await conversation();
+    const original = await service.sendMessage(dm.id, sender, type === 'TEXT' ? 'text' : '', reader, {
+      type, mediaUrl: 'https://example.com/media', thumbnailUrl: 'https://example.com/thumb',
+      duration: 12, fileName: 'file', fileMimeType: 'application/test', fileSize: 123,
+      sharedReference: { id: 'reference', preview: 'preview' },
+    });
+    const reply = await service.replyMessage(dm.id, reader, 'reply', original.id, sender);
+    const history = await service.getMessages(dm.id, reader, 1, 200);
+    const fromHistory = history.messages.find(m => m.id === reply.id);
+    assert.deepEqual(fromHistory.repliedTo, reply.repliedTo);
+    assert.equal(reply.repliedTo.mediaUrl, 'https://example.com/media');
+    assert.equal(reply.repliedTo.fileSize, 123);
+    assert.deepEqual(events.find(e => e.name === 'chatMessage' && e.payload.messageId === reply.id).payload.message.repliedTo,
+      JSON.parse(JSON.stringify(reply.repliedTo)));
+    await assert.rejects(service.sendMessage(group.id, reader, 'bad', sender, { repliedToId: original.id }));
+  });
+}
+test('persistent personal deletion, mixed batch permissions, tombstone replies and pagination', async () => {
+  const dm = await conversation();
+  const own = await service.sendMessage(dm.id, reader, 'mine', sender);
+  const other = await send(dm);
+  const foreign = await send(group);
+  await service.deleteMessage(other.id, reader, 'me');
+  await service.deleteMessage(other.id, reader, 'me');
+  assert.equal(await prisma.messageDeletion.count({ where: { messageId: other.id, userId: reader } }), 1);
+  assert.ok(!(await service.getMessages(dm.id, reader, 1, 200)).messages.some(m => m.id === other.id));
+  assert.ok((await service.getMessages(dm.id, sender, 1, 200)).messages.some(m => m.id === other.id));
+  assert.ok(!(await service.getPendingDeliveryMessages(reader, 200)).some(m => m.id === other.id));
+  const result = await service.deleteMessages(dm.id, reader, [own.id, other.id, foreign.id, own.id], 'everyone');
+  assert.deepEqual(result.results.map(r => r.success), [true, false, false]);
+  const reply = await service.replyMessage(dm.id, sender, 'deleted original', own.id, reader);
+  assert.ok(reply.repliedTo.deletedAt);
+  assert.equal(reply.repliedTo.content, '');
+  assert.equal(reply.repliedTo.mediaUrl, null);
+  await assert.rejects(service.editMessage(own.id, reader, 'resurrect'));
+  assert.ok((await service.syncReceipts(reader, [own.id]))[0].deletedAt);
+});
+test('message creation survives Kafka failure with durable retry and personal-room reply delivery', async () => {
+  const dm = await conversation();
+  kafkaFails = true;
+  const m = await send(dm);
+  kafkaFails = false;
+  assert.ok(await prisma.receiptOutbox.count());
+  await prisma.receiptOutbox.updateMany({ data: { availableAt: new Date(0) } });
+  await publishReceipts();
+  const event = events.find(e => e.name === 'chatMessage' && e.payload.messageId === m.id);
+  assert.ok(event);
+  const emitted = [];
+  const io = { to: room => ({ emit: (name, payload) => emitted.push({room,name,payload}) }) };
+  await routeEvent(io, 'chat.messages', event.payload);
+  await routeEvent(io, 'chat.messages', event.payload);
+  assert.equal(emitted.filter(e => e.name === 'message:new').length, 2);
+  assert.ok(emitted.every(e => e.room === `user:${reader}`));
+  assert.equal(emitted[0].payload.id, m.id);
+});

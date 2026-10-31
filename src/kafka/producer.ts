@@ -52,6 +52,7 @@ export async function publishEvent<T extends object>(
 import { TOPICS } from '../config/kafka.js';
 
 export interface ChatMessageEvent {
+  message?: Record<string, unknown>;
   messageId: string;
   conversationId: string;
   senderId: string;
