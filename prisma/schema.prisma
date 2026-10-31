@@ -97,6 +97,8 @@ model User {
   reports  Report[] @relation("Reporter")
 
   // Messaging
+  mediaAssets MediaAsset[]
+  messageDeletions MessageDeletion[]
   messageReceipts MessageReceipt[]
   sentMessages     Message[] @relation("SentMessages")
   receivedMessages Message[] @relation("ReceivedMessages")
@@ -107,8 +109,10 @@ model User {
   storyViews StoryView[] @relation("StoryViews")
 
   // Notifications
+  actorNotifications Notification[] @relation("NotificationActor")
   notifications Notification[]
 
+  @@index([avatarUrl])
   @@index([accountStatus])
   @@index([createdAt])
   @@index([lastActiveAt])
@@ -118,6 +122,21 @@ model User {
 // ─────────────────────────────────────────────────────────────
 // AUTH TOKENS
 // ─────────────────────────────────────────────────────────────
+model MediaAsset {
+  id String @id @default(uuid())
+  ownerId String @map("owner_id")
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  key String @unique
+  url String @unique
+  sourceUrl String? @map("source_url")
+  mimeType String @map("mime_type")
+  size Int
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([sourceUrl])
+  @@index([ownerId, createdAt])
+  @@map("media_assets")
+}
+
 model RefreshToken {
   id        String   @id @default(uuid())
   token     String   @unique
@@ -149,6 +168,8 @@ model Follow {
 // POSTS
 // ─────────────────────────────────────────────────────────────
 model Post {
+  mediaMetadata Json? @map("media_metadata")
+  activities Notification[]
   id         String    @id @default(uuid())
   content    String
   imageUrls  String[]  @map("image_urls")
@@ -166,6 +187,8 @@ model Post {
   savedBy  SavedPost[]
   reports  Report[]
 
+  @@index([imageUrls], type: Gin)
+  @@index([videoUrl])
   @@index([authorId])
   @@index([createdAt])
   @@index([deletedAt])
@@ -186,6 +209,9 @@ model Like {
 }
 
 model Comment {
+  parent Comment? @relation("CommentReplies", fields: [repliedToId], references: [id], onDelete: SetNull)
+  replies Comment[] @relation("CommentReplies")
+  notifications Notification[]
   id          String    @id @default(uuid())
   content     String
   authorId    String    @map("author_id")
@@ -193,10 +219,13 @@ model Comment {
   author      User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
   post        Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
   createdAt   DateTime  @default(now()) @map("created_at")
+  clientRequestId String? @map("client_request_id")
   repliedToId String?   @map("replied_to_id")
   deletedAt   DateTime? @map("deleted_at")
   deletedBy   String?   @map("deleted_by")
 
+  @@unique([authorId, clientRequestId])
+  @@index([postId, createdAt, id])
   @@index([postId])
   @@index([authorId])
   @@index([createdAt])
@@ -315,7 +344,23 @@ model ReceiptOutbox {
   @@map("receipt_outbox")
 }
 
+model MessageDeletion {
+  messageId String @map("message_id")
+  userId String @map("user_id")
+  deletedAt DateTime @default(now()) @map("deleted_at")
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([messageId, userId])
+  @@index([userId, deletedAt])
+  @@map("message_deletions")
+}
+
 model Message {
+  deletions MessageDeletion[]
+  fileName String? @map("file_name")
+  fileMimeType String? @map("file_mime_type")
+  fileSize Int? @map("file_size")
+  sharedReference Json? @map("shared_reference")
   receipts MessageReceipt[]
   id              String        @id @default(uuid())
   content         String
@@ -344,6 +389,9 @@ model Message {
   forwardedFrom   Message?      @relation("Forwards", fields: [forwardedFromId], references: [id])
   forwards        Message[]     @relation("Forwards")
 
+  @@index([mediaUrl])
+  @@index([thumbnailUrl])
+  @@index([conversationId, createdAt, id])
   @@index([conversationId])
   @@index([senderId])
   @@index([receiverId])
@@ -372,6 +420,7 @@ model Story {
 
   views StoryView[]
 
+  @@index([mediaUrl])
   @@index([userId])
   @@index([createdAt])
   @@index([expiresAt])
@@ -395,6 +444,10 @@ model StoryView {
 // NOTIFICATIONS
 // ─────────────────────────────────────────────────────────────
 model Notification {
+  postId String? @map("post_id")
+  post Post? @relation(fields: [postId], references: [id], onDelete: SetNull)
+  dedupeKey String? @unique @map("dedupe_key")
+  commentId String? @map("comment_id")
   id         String           @id @default(uuid())
   type       NotificationType
   content    String
@@ -402,9 +455,12 @@ model Notification {
   userId     String           @map("user_id")
   actorId    String?          @map("actor_id")
   resourceId String?          @map("resource_id")
+  actor User? @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+  comment Comment? @relation(fields: [commentId], references: [id], onDelete: SetNull)
   user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt  DateTime         @default(now()) @map("created_at")
 
+  @@index([userId, createdAt, id])
   @@index([userId, isRead])
   @@map("notifications")
 }

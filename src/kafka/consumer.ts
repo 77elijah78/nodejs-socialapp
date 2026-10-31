@@ -1,3 +1,5 @@
+import { messageInclude, serializeMessage } from '../services/message.dto.js';
+import { prisma } from '../config/database.js';
 import { z } from 'zod';
 import { Consumer, EachMessagePayload } from 'kafkajs';
 import { Server } from 'socket.io';
@@ -61,7 +63,7 @@ export async function disconnectConsumer(): Promise<void> {
 export async function routeEvent(io: Server, topic: string, payload: unknown): Promise<void> {
   switch (topic) {
     case TOPICS.CHAT_MESSAGES:
-      handleChatMessage(io, payload as ChatMessageEvent);
+      await handleChatMessage(io, payload as ChatMessageEvent);
       break;
 
     case TOPICS.CHAT_DELIVERED:
@@ -73,7 +75,7 @@ export async function routeEvent(io: Server, topic: string, payload: unknown): P
       break;
 
     case TOPICS.CHAT_DELETED:
-      handleMessageDeleted(io, payload as MessageDeletedEvent);
+      await handleMessageDeleted(io, payload as MessageDeletedEvent);
       break;
 
     case TOPICS.CHAT_DELETED_FOR_ME:
@@ -103,7 +105,19 @@ export async function routeEvent(io: Server, topic: string, payload: unknown): P
 
 // ─── Handlers ─────────────────────────────────────────────────────
 
-function handleChatMessage(io: Server, event: ChatMessageEvent): void {
+async function handleChatMessage(io: Server, event: ChatMessageEvent): Promise<void> {
+  if (event.message) {
+    const current = await prisma.message.findFirst({ where: { id: event.messageId,
+      deletions: { none: { userId: event.receiverId } },
+      conversation: { participants: { some: { userId: event.receiverId, deletedAt: null } } },
+    }, include: { ...messageInclude, receipts: { where: { userId: event.receiverId }, select: { readAt: true } } } });
+    if (!current) return;
+    const { receipts, ...message } = current;
+    event.message = { ...serializeMessage(message), isGroup: event.isGroup, readByMe: !!receipts[0]?.readAt };
+    event.content = current.deletedAt ? '' : current.content;
+    event.mediaUrl = current.deletedAt ? null : current.mediaUrl;
+    event.thumbnailUrl = current.deletedAt ? null : current.thumbnailUrl;
+  }
   if (!event.receiverId) {
     logger.error(`[Kafka→WS] chat.messages missing receiverId`, {
       messageId: event.messageId,
@@ -112,7 +126,7 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
     return;
   }
 
-  const replyData = event.repliedToId
+  const replyData = event.message?.repliedTo ?? (event.repliedToId
     ? {
         id: event.repliedToId,
         content: event.repliedToContent,
@@ -120,16 +134,17 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
         senderUsername: event.repliedToSenderUsername,
         type: event.repliedToType,
       }
-    : null;
+    : null);
 
   const messagePayload = {
+    ...event.message,
     id: event.messageId,
     messageId: event.messageId,
     conversationId: event.conversationId,
     senderId: event.senderId,
-    receiverId: event.receiverId,
+    receiverId: event.message ? event.message.receiverId : event.receiverId,
     isGroup: event.isGroup,
-    readByMe: false,
+    readByMe: event.message?.readByMe ?? false,
     content: event.content,
     mediaUrl: event.mediaUrl ?? null,
     thumbnailUrl: event.thumbnailUrl ?? null,
@@ -141,6 +156,7 @@ function handleChatMessage(io: Server, event: ChatMessageEvent): void {
       id: event.senderId,
       username: event.senderUsername,
       avatarUrl: event.senderAvatarUrl,
+      ...(event.message?.sender as object ?? {}),
     },
   };
 
@@ -193,8 +209,9 @@ function handleMessageEdited(io: Server, event: MessageEditedEvent): void {
   );
 }
 
-function handleMessageDeleted(io: Server, event: MessageDeletedEvent): void {
-  io.to(`conversation:${event.conversationId}`).emit('message:deleted', {
+async function handleMessageDeleted(io: Server, event: MessageDeletedEvent): Promise<void> {
+  const participants = await prisma.conversationParticipant.findMany({ where: { conversationId: event.conversationId, deletedAt: null }, select: { userId: true } });
+  io.to(participants.map(p => `user:${p.userId}`)).emit('message:deleted', {
     messageId: event.messageId,
     conversationId: event.conversationId,
     deletedAt: event.deletedAt,
@@ -219,6 +236,7 @@ function handleMessageDeletedForMe(io: Server, event: MessageDeletedForMeEvent):
 
 function handleNotification(io: Server, event: NotificationEvent): void {
   io.to(`user:${event.userId}`).emit('notification:new', {
+    id: event.id, commentId: event.commentId, createdAt: event.createdAt,
     type: event.type,
     content: event.content,
     actorId: event.actorId,

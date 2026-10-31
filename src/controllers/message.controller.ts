@@ -11,6 +11,12 @@ function getParamValue(param: string | string[]): string {
 }
 
 export const messageController = {
+  async deleteMessages(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { conversationId, messageIds, deleteFor } = req.body;
+      sendSuccess(res, await messageService.deleteMessages(conversationId, (req as AuthRequest).user.userId, messageIds, deleteFor));
+    } catch (err) { next(err); }
+  },
   async syncReceipts(req: Request, res: Response, next: NextFunction) {
     try {
       sendSuccess(res, await messageService.syncReceipts((req as AuthRequest).user.userId, req.body.messageIds));
@@ -86,7 +92,7 @@ export const messageController = {
 
       const message = await messageService.sendMessage(
         conversationId, userId, content, req.body.receiverId,
-        { mediaUrl, thumbnailUrl, type, duration, repliedToId, forwardedFromId }
+        { ...req.body, mediaUrl, thumbnailUrl, type, duration, repliedToId, forwardedFromId }
       );
       sendSuccess(res, message, 'Message sent', 201);
     } catch (err) {
@@ -180,7 +186,7 @@ export const messageController = {
 
       const message = await messageService.replyMessage(
         conversationId, userId, content, repliedToId, receiverId,
-        { mediaUrl, thumbnailUrl, type, duration }
+        { ...req.body, mediaUrl, thumbnailUrl, type, duration }
       );
       sendSuccess(res, message, 'Reply sent', 201);
     } catch (err) {

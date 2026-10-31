@@ -1,3 +1,4 @@
+import { batchDeletePayload, sendMessageSchema, replyMessageSchema } from '../middlewares/schemas.js';
 import { z } from 'zod';
 import { Server } from 'socket.io';
 import { AuthenticatedSocket } from './index.js';
@@ -66,8 +67,11 @@ interface ForwardPayload {
 
 export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): void => {
   // Join a conversation room
-  socket.on('conversation:join', (conversationId: string) => {
-    socket.join(`conversation:${conversationId}`);
+  socket.on('conversation:join', async (conversationId: string, ack?: Function) => {
+    try { await messageService.requireMember(z.string().uuid().parse(conversationId), socket.userId);
+    await socket.join(`conversation:${conversationId}`);
+    ack?.({ success: true });
+    } catch (error) { ack?.({ success: false, error: (error as Error).message }); }
     logger.debug(`${socket.username} joined conversation:${conversationId}`);
   });
 
@@ -91,6 +95,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Send message via WebSocket
   socket.on('message:send', async (payload: SendMessagePayload, ack?: Function) => {
     try {
+      sendMessageSchema.parse({ body: payload, params: { conversationId: payload.conversationId } });
       const { conversationId, content, receiverId, mediaUrl, thumbnailUrl, type, duration, repliedToId, forwardedFromId } = payload;
 
       const message = await messageService.sendMessage(
@@ -98,10 +103,10 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
         socket.userId,
         content ?? '',
         receiverId,
-        { mediaUrl, thumbnailUrl, type: type as any, duration, repliedToId, forwardedFromId }
+        { ...payload, mediaUrl, thumbnailUrl, type: type as any, duration, repliedToId, forwardedFromId }
       );
 
-      ack?.({ success: true, messageId: message.id });
+      ack?.({ success: true, messageId: message.id, message });
     } catch (err) {
       logger.error('message:send error', err);
       ack?.({ success: false, error: (err as Error).message });
@@ -111,6 +116,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Reply to a message via WebSocket
   socket.on('message:reply', async (payload: ReplyPayload, ack?: Function) => {
     try {
+      replyMessageSchema.parse({ body: payload, params: { conversationId: payload.conversationId } });
       const { conversationId, content, repliedToId, receiverId, mediaUrl, thumbnailUrl, type, duration } = payload;
 
       const message = await messageService.replyMessage(
@@ -119,10 +125,10 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
         content,
         repliedToId,
         receiverId,
-        { mediaUrl, thumbnailUrl, type: type as any, duration }
+        { ...payload, mediaUrl, thumbnailUrl, type: type as any, duration }
       );
 
-      ack?.({ success: true, messageId: message.id });
+      ack?.({ success: true, messageId: message.id, message });
     } catch (err) {
       logger.error('message:reply error', err);
       ack?.({ success: false, error: (err as Error).message });
@@ -130,7 +136,8 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   });
 
   // Typing indicator
-  socket.on('message:typing', (payload: TypingPayload) => {
+  socket.on('message:typing', async (payload: TypingPayload) => {
+    try { await messageService.requireMember(payload.conversationId, socket.userId); } catch { return; }
     socket
       .to(`conversation:${payload.conversationId}`)
       .emit('message:typing', {
@@ -175,17 +182,25 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   socket.on('message:edit', async (payload: EditPayload, ack?: Function) => {
     try {
       const message = await messageService.editMessage(payload.messageId, socket.userId, payload.content);
-      ack?.({ success: true, messageId: message.id });
+      ack?.({ success: true, messageId: message.id, message });
     } catch (err) {
       logger.error('message:edit error', err);
       ack?.({ success: false, error: (err as Error).message });
     }
   });
 
+  socket.on('message:delete-batch', async (payload: unknown, ack?: Function) => {
+    try {
+      const input = batchDeletePayload.parse(payload);
+      const result = await messageService.deleteMessages(input.conversationId, socket.userId, input.messageIds, input.deleteFor);
+      ack?.({ success: true, ...result });
+    } catch (error) { ack?.({ success: false, error: (error as Error).message }); }
+  });
+
   // Delete message via WebSocket
   socket.on('message:delete', async (payload: DeletePayload, ack?: Function) => {
     try {
-      const result = await messageService.deleteMessage(payload.messageId, socket.userId, payload.deleteFor);
+      await messageService.deleteMessage(payload.messageId, socket.userId, payload.deleteFor, payload.conversationId);
       ack?.({ success: true, messageId: payload.messageId });
     } catch (err) {
       logger.error('message:delete error', err);

@@ -1,3 +1,4 @@
+import { createActivity, publishActivity } from './activity.service.js';
 import { prisma } from '../config/database.js';
 import { NotFoundError, ConflictError } from '../utils/errors.js';
 
@@ -8,7 +9,6 @@ export const userService = {
       select: {
         id: true,
         username: true,
-        email: true,
         displayName: true,
         bio: true,
         avatarUrl: true,
@@ -94,17 +94,14 @@ export const userService = {
     if (!target) throw new NotFoundError('User');
     if (target.id === followerId) throw new ConflictError('Cannot follow yourself');
 
-    const existing = await prisma.follow.findUnique({
-      where: { followerId_followingId: { followerId, followingId: target.id } },
+    await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id=${target.id} FOR UPDATE`;
+      await tx.follow.upsert({ where: { followerId_followingId: { followerId, followingId: target.id } },
+        create: { followerId, followingId: target.id }, update: {} });
+      await createActivity(tx, { userId: target.id, actorId: followerId, type: 'FOLLOW',
+        content: 'started following you', dedupeKey: `follow:${followerId}:${target.id}` });
     });
-    if (existing) throw new ConflictError('Already following');
-
-    await prisma.follow.create({ data: { followerId, followingId: target.id } });
-
-    // Create notification
-    await prisma.notification.create({
-      data: { type: 'FOLLOW', content: 'started following you', userId: target.id, actorId: followerId },
-    });
+    await publishActivity();
 
     return { message: `Now following @${targetUsername}` };
   },

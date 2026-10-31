@@ -1,3 +1,6 @@
+import fs from 'node:fs/promises';
+import { z } from 'zod';
+import { AuthRequest } from '../types/index.js';
 import { Request, Response, NextFunction } from 'express';
 import { processUploadedFile, processUploadedFiles } from '../services/media.service.js';
 import { sendSuccess } from '../utils/response.js';
@@ -12,10 +15,13 @@ export const mediaController = {
     try {
       if (!req.file) throw new AppError('No file provided', 400);
 
-      const media = await processUploadedFile(req.file);
+      const duration = req.body?.duration === undefined ? undefined : z.coerce.number().finite().nonnegative().max(86400).parse(req.body.duration);
+      const media = await processUploadedFile(req.file, (req as AuthRequest).user.userId);
+      if (duration !== undefined) media.duration = duration;
 
       sendSuccess(res, media, 'File uploaded successfully', 201);
     } catch (err) {
+      if (req.file) await fs.unlink(req.file.path).catch(() => {});
       next(err);
     }
   },
@@ -27,10 +33,11 @@ export const mediaController = {
       const files = req.files as Express.Multer.File[];
       if (!files || files.length === 0) throw new AppError('No images provided', 400);
 
-      const media = await processUploadedFiles(files);
+      const media = await processUploadedFiles(files, (req as AuthRequest).user.userId);
 
       sendSuccess(res, media, `${media.length} image(s) uploaded`, 201);
     } catch (err) {
+      if (req.file) await fs.unlink(req.file.path).catch(() => {});
       next(err);
     }
   },
@@ -41,7 +48,7 @@ export const mediaController = {
     try {
       if (!req.file) throw new AppError('No image provided', 400);
 
-      const media = await processUploadedFile(req.file);
+      const media = await processUploadedFile(req.file, (req as AuthRequest).user.userId);
 
       sendSuccess(res, {
         url: media.url,
@@ -50,6 +57,7 @@ export const mediaController = {
         height: media.height,
       }, 'Avatar uploaded', 201);
     } catch (err) {
+      if (req.file) await fs.unlink(req.file.path).catch(() => {});
       next(err);
     }
   },
