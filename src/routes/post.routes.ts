@@ -1,3 +1,7 @@
+import { z } from 'zod';
+import { postService } from '../services/post.service.js';
+import { parsePagination, type AuthRequest } from '../types/index.js';
+import { sendSuccess, buildPaginationMeta } from '../utils/response.js';
 import { Router } from 'express';
 import { postController } from '../controllers/post.controller.js';
 import { authenticate, optionalAuth } from '../middlewares/authenticate.js';
@@ -21,6 +25,18 @@ router.post('/:id/like', authenticate, postController.like);
 router.delete('/:id/like', authenticate, postController.unlike);
 router.post('/:id/save', authenticate, postController.save);
 router.delete('/:id/save', authenticate, postController.unsave);
+router.get('/:id/comments', authenticate, async (req, res, next) => {
+  try {
+    const id = z.string().uuid().parse(req.params.id);
+    const { page, limit } = parsePagination(req.query);
+    const result = await postService.getComments(id, (req as AuthRequest).user.userId, page, limit);
+    sendSuccess(res, result.comments, 'Comments', 200, buildPaginationMeta(result.total, page, limit));
+  } catch (error) { next(error); }
+});
+router.delete('/:id/comments/:commentId', authenticate, async (req, res, next) => {
+  try { sendSuccess(res, await postService.deleteComment(z.string().uuid().parse(req.params.id), z.string().uuid().parse(req.params.commentId), (req as AuthRequest).user.userId)); }
+  catch (error) { next(error); }
+});
 router.post('/:id/comments', authenticate, validate(commentSchema), postController.comment);
 router.post('/:id/share', authenticate, validate(shareSchema), postController.share);
 router.post('/:id/report', authenticate, validate(reportPostSchema), postController.report);

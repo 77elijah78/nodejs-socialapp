@@ -6,7 +6,7 @@ import { logger } from '../config/logger.js';
 import { pubClient, subClient } from '../config/redis.js';
 import { registerChatHandlers } from './chat.handler.js';
 import { registerPresenceHandlers } from './presence.handler.js';
-import { messageService } from '../services/message.service.js';
+import { prisma } from '../config/database.js';
 
 export interface AuthenticatedSocket extends Socket {
   userId: string;
@@ -44,7 +44,7 @@ export const initSocket = async (httpServer: HTTPServer): Promise<Server> => {
   logger.info('✅ Socket.io Redis adapter attached');
 
   // ─── JWT Auth middleware ───────────────────────────────────
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     const token =
       socket.handshake.auth?.token ??
       socket.handshake.headers?.authorization?.replace('Bearer ', '');
@@ -53,8 +53,10 @@ export const initSocket = async (httpServer: HTTPServer): Promise<Server> => {
 
     try {
       const payload = verifyToken(token);
+      const user = await prisma.user.findUnique({ where: { id: payload.userId }, select: { accountStatus: true, deletedAt: true, username: true } });
+      if (!user || user.deletedAt || user.accountStatus !== 'ACTIVE') return next(new Error('Account is unavailable'));
       (socket as AuthenticatedSocket).userId = payload.userId;
-      (socket as AuthenticatedSocket).username = payload.username;
+      (socket as AuthenticatedSocket).username = user.username;
       next();
     } catch {
       next(new Error('Invalid token'));

@@ -105,6 +105,7 @@ export const postController = {
         userId,
         content,
         repliedToId,
+        req.body.clientRequestId,
       );
       sendSuccess(res, comment, "Comment added", 201);
     } catch (err) {

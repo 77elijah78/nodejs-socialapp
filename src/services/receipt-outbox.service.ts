@@ -18,7 +18,12 @@ export async function publishReceipts(id?: string): Promise<void> {
     RETURNING id, payload, attempts`;
   for (const row of rows) {
     try {
-      await kafkaEvents.messageRead(row.payload as MessageReadEvent);
+      const payload = row.payload as { kind?: string; event?: object };
+      if (payload.kind) {
+        const publishers = kafkaEvents as unknown as Record<string, (event: object) => Promise<void>>;
+        if (!['notification', 'chatMessage', 'messageDelivered', 'messageDeleted', 'messageDeletedForMe'].includes(payload.kind)) throw new Error('Unknown outbox event');
+        await publishers[payload.kind](payload.event!);
+      } else await kafkaEvents.messageRead(row.payload as MessageReadEvent);
       await prisma.receiptOutbox.deleteMany({ where: { id: row.id, claimToken: token } });
     } catch (error) {
       logger.error('Receipt publication retained for retry', error);
