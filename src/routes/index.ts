@@ -1,3 +1,5 @@
+import pushRoutes from './push.routes.js';
+import activityRoutes, { createActivityRouter } from './activity.routes.js';
 import { Router } from 'express';
 import authRoutes    from './auth.routes.js';
 import userRoutes    from './user.routes.js';
@@ -8,6 +10,9 @@ import adminRoutes   from './admin.routes.js';
 
 const router = Router();
 
+router.use('/push', pushRoutes);
+router.use('/activity', activityRoutes);
+router.use('/notifications', createActivityRouter(true));
 router.use('/auth',     authRoutes);
 router.use('/users',    userRoutes);
 router.use('/posts',    postRoutes);

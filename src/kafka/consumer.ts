@@ -1,3 +1,7 @@
+import { emitMessageOnce } from '../services/delivery-state.service.js';
+import { activityService } from '../services/activity.service.js';
+import { messageInclude, serializeMessage } from '../services/message.dto.js';
+import { prisma } from '../config/database.js';
 import { z } from 'zod';
 import { Consumer, EachMessagePayload } from 'kafkajs';
 import { Server } from 'socket.io';
@@ -33,7 +37,11 @@ export async function connectConsumer(io: Server): Promise<void> {
     fromBeginning: false,
   });
 
-  consumer.on(consumer.events.GROUP_JOIN, () => io.local.emit('receipts:resync'));
+  consumer.on(consumer.events.GROUP_JOIN, () => {
+    io.local.emit('receipts:resync');
+    io.local.emit('notifications:sync', { reason: 'consumer-rejoined' });
+    io.local.emit('messages:sync', { reason: 'consumer-rejoined' });
+  });
   await consumer.run({
     eachBatchAutoResolve: true,
     eachMessage: async ({ topic, message }: EachMessagePayload) => {
@@ -61,7 +69,7 @@ export async function disconnectConsumer(): Promise<void> {
 export async function routeEvent(io: Server, topic: string, payload: unknown): Promise<void> {
   switch (topic) {
     case TOPICS.CHAT_MESSAGES:
-      handleChatMessage(io, payload as ChatMessageEvent);
+      await handleChatMessage(io, payload as ChatMessageEvent);
       break;
 
     case TOPICS.CHAT_DELIVERED:
@@ -73,7 +81,7 @@ export async function routeEvent(io: Server, topic: string, payload: unknown): P
       break;
 
     case TOPICS.CHAT_DELETED:
-      handleMessageDeleted(io, payload as MessageDeletedEvent);
+      await handleMessageDeleted(io, payload as MessageDeletedEvent);
       break;
 
     case TOPICS.CHAT_DELETED_FOR_ME:
@@ -81,7 +89,7 @@ export async function routeEvent(io: Server, topic: string, payload: unknown): P
       break;
 
     case TOPICS.NOTIFICATIONS:
-      handleNotification(io, payload as NotificationEvent);
+      await handleNotification(io, payload as NotificationEvent);
       break;
 
     case TOPICS.PRESENCE:
@@ -103,68 +111,25 @@ export async function routeEvent(io: Server, topic: string, payload: unknown): P
 
 // ─── Handlers ─────────────────────────────────────────────────────
 
-function handleChatMessage(io: Server, event: ChatMessageEvent): void {
-  if (!event.receiverId) {
-    logger.error(`[Kafka→WS] chat.messages missing receiverId`, {
-      messageId: event.messageId,
-      conversationId: event.conversationId,
-    });
-    return;
-  }
-
-  const replyData = event.repliedToId
-    ? {
-        id: event.repliedToId,
-        content: event.repliedToContent,
-        senderId: event.repliedToSenderId,
-        senderUsername: event.repliedToSenderUsername,
-        type: event.repliedToType,
-      }
-    : null;
-
-  const messagePayload = {
-    id: event.messageId,
-    messageId: event.messageId,
-    conversationId: event.conversationId,
-    senderId: event.senderId,
-    receiverId: event.receiverId,
-    isGroup: event.isGroup,
-    readByMe: false,
-    content: event.content,
-    mediaUrl: event.mediaUrl ?? null,
-    thumbnailUrl: event.thumbnailUrl ?? null,
-    type: event.type,
-    createdAt: event.createdAt,
-    timestamp: new Date(event.createdAt).getTime(),
-    repliedTo: replyData,
-    sender: {
-      id: event.senderId,
-      username: event.senderUsername,
-      avatarUrl: event.senderAvatarUrl,
-    },
-  };
-
-  io.to(`user:${event.receiverId}`).emit('message:new', messagePayload);
-
-  io.to(`user:${event.receiverId}`).emit('message:notification', {
-    id: event.messageId,
-    conversationId: event.conversationId,
-    senderId: event.senderId,
-    sender: {
-      username: event.senderUsername,
-      avatarUrl: event.senderAvatarUrl,
-    },
-    content: event.content,
-    mediaUrl: event.mediaUrl ?? null,
-    thumbnailUrl: event.thumbnailUrl ?? null,
-    type: event.type,
-    createdAt: event.createdAt,
-    repliedTo: replyData,
+const messageRoutingSchema = z.object({ messageId: z.string().uuid(), conversationId: z.string().uuid(), senderId: z.string().uuid(), receiverId: z.string().uuid() });
+async function handleChatMessage(io: Server, payload: ChatMessageEvent): Promise<void> {
+  const event = messageRoutingSchema.parse(payload);
+  if (event.senderId === event.receiverId) return;
+  const current = await prisma.message.findFirst({ where: { id: event.messageId, conversationId: event.conversationId,
+    senderId: event.senderId, deletions: { none: { userId: event.receiverId } },
+    receipts: { some: { userId: event.receiverId } },
+    conversation: { participants: { some: { userId: event.receiverId, deletedAt: null, user: { accountStatus: 'ACTIVE', deletedAt: null } } } },
+  }, include: { ...messageInclude, conversation: { select: { isGroup: true } },
+    receipts: { where: { userId: event.receiverId }, select: { readAt: true } } } });
+  if (!current) return;
+  const { receipts, conversation, ...message } = current;
+  const messagePayload = { ...serializeMessage(message), messageId: message.id,
+    isGroup: conversation.isGroup, readByMe: !!receipts[0]?.readAt, timestamp: message.createdAt.getTime() };
+  await emitMessageOnce(event.messageId, event.receiverId, () => {
+    io.to(`user:${event.receiverId}`).emit('message:new', messagePayload);
+    // Legacy banner event remains; now carries the same complete DTO.
+    io.to(`user:${event.receiverId}`).emit('message:notification', messagePayload);
   });
-
-  logger.debug(
-    `[Kafka→WS] chat.messages → user:${event.receiverId} message:${event.messageId}`
-  );
 }
 
 function handleMessageDelivered(io: Server, event: MessageDeliveredEvent): void {
@@ -193,8 +158,9 @@ function handleMessageEdited(io: Server, event: MessageEditedEvent): void {
   );
 }
 
-function handleMessageDeleted(io: Server, event: MessageDeletedEvent): void {
-  io.to(`conversation:${event.conversationId}`).emit('message:deleted', {
+async function handleMessageDeleted(io: Server, event: MessageDeletedEvent): Promise<void> {
+  const participants = await prisma.conversationParticipant.findMany({ where: { conversationId: event.conversationId, deletedAt: null }, select: { userId: true } });
+  io.to(participants.map(p => `user:${p.userId}`)).emit('message:deleted', {
     messageId: event.messageId,
     conversationId: event.conversationId,
     deletedAt: event.deletedAt,
@@ -217,15 +183,37 @@ function handleMessageDeletedForMe(io: Server, event: MessageDeletedForMeEvent):
   );
 }
 
-function handleNotification(io: Server, event: NotificationEvent): void {
-  io.to(`user:${event.userId}`).emit('notification:new', {
-    type: event.type,
-    content: event.content,
-    actorId: event.actorId,
-    resourceId: event.resourceId,
-  });
-
-  logger.debug(`[Kafka→WS] notifications → user:${event.userId}`);
+const notificationEventSchema = z.object({
+  id: z.string().uuid().optional(), userId: z.string().uuid(),
+  actorId: z.string().uuid().nullable().optional(),
+  type: z.enum(['LIKE', 'COMMENT', 'FOLLOW', 'MESSAGE', 'MENTION', 'SHARE']).optional(),
+  resourceId: z.string().optional(), operation: z.enum(['updated', 'sync']).optional(),
+}).refine(e => e.operation === 'sync' || !!e.type, { message: 'Notification type is required' })
+  .refine(e => e.operation === 'sync' || !!e.id || !!e.actorId, { message: 'Notification identity is required' });
+async function handleNotification(io: Server, payload: NotificationEvent): Promise<void> {
+  const event = notificationEventSchema.parse(payload);
+  if (event.operation === 'sync') {
+    const recipient = await prisma.user.findFirst({ where: { id: event.userId, accountStatus: 'ACTIVE', deletedAt: null }, select: { id: true } });
+    if (recipient) io.to(`user:${event.userId}`).emit('notifications:sync', { reason: 'state-changed' });
+    return;
+  }
+  // Old rolling-deployment events may omit ID. Resolve only an existing persisted
+  // notification; never manufacture another record from Kafka delivery.
+  const row = await prisma.notification.findFirst({ where: {
+    ...(event.id ? { id: event.id } : { actorId: event.actorId, type: event.type,
+      resourceId: event.resourceId ?? null }), userId: event.userId,
+    user: { accountStatus: 'ACTIVE', deletedAt: null },
+  }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] });
+  if (!row) return;
+  if (row.dismissedAt || row.withdrawnAt) {
+    if (event.operation === 'updated') io.to(`user:${event.userId}`).emit('notification:removed', {
+      id: row.id, version: row.version, reason: row.dismissedAt ? 'dismissed' : 'withdrawn',
+    });
+    return;
+  }
+  const notification = await activityService.forDelivery(event.userId, row.id);
+  if (!notification) return;
+  io.to(`user:${event.userId}`).emit('notification:new', notification);
 }
 
 function handlePresence(io: Server, event: PresenceEvent): void {
