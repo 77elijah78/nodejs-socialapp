@@ -52,6 +52,7 @@ export async function publishEvent<T extends object>(
 import { TOPICS } from '../config/kafka.js';
 
 export interface ChatMessageEvent {
+  message?: Record<string, unknown>;
   messageId: string;
   conversationId: string;
   senderId: string;
@@ -72,10 +73,16 @@ export interface ChatMessageEvent {
 }
 
 export interface NotificationEvent {
+  id?: string;
+  commentId?: string;
+  createdAt?: string;
   userId: string;
-  actorId: string;
-  type: 'LIKE' | 'COMMENT' | 'FOLLOW' | 'MESSAGE' | 'MENTION' | 'SHARE';
-  content: string;
+  actorId?: string | null;
+  version?: number;
+  operation?: 'updated' | 'sync';
+  reason?: string;
+  type?: 'LIKE' | 'COMMENT' | 'FOLLOW' | 'MESSAGE' | 'MENTION' | 'SHARE';
+  content?: string;
   resourceId?: string;
 }
 
@@ -131,6 +138,12 @@ export interface ConversationDeletedEvent {
 export const kafkaEvents = {
   chatMessage: (event: ChatMessageEvent) =>
     publishEvent(TOPICS.CHAT_MESSAGES, event, event.conversationId),
+
+  notificationState: (event: NotificationEvent) =>
+    publishEvent(TOPICS.NOTIFICATIONS, { ...event, operation: 'sync' }, event.userId),
+
+  notificationUpdated: (event: NotificationEvent) =>
+    publishEvent(TOPICS.NOTIFICATIONS, { ...event, operation: 'updated' }, event.userId),
 
   notification: (event: NotificationEvent) =>
     publishEvent(TOPICS.NOTIFICATIONS, event, event.userId),

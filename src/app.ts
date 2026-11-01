@@ -1,3 +1,6 @@
+import { mediaBaseUrl } from './config/media.js';
+import { optionalAuth } from './middlewares/authenticate.js';
+import { authorizeMedia } from './middlewares/media-access.js';
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
@@ -15,6 +18,7 @@ import { maintenanceModeGuard } from './middlewares/maintenance.js';
 const app = express();
 
 // ─── Ensure upload dirs exist on startup ──────────────────────────
+mediaBaseUrl();
 ensureUploadDirs();
 
 // ─── Security ─────────────────────────────────────────────────────
@@ -59,22 +63,13 @@ app.use(
 //         GET /uploads/audio/abc.mp3
 const uploadsPath = path.resolve(process.env.UPLOADS_PATH ?? 'uploads');
 app.use(
-  '/uploads',
+  '/uploads', optionalAuth, authorizeMedia,
   express.static(uploadsPath, {
-    maxAge: '7d',          // Cache media files for 7 days
-    immutable: true,       // Files are content-addressed (UUID names never change)
+    maxAge: 0,          // Cache media files for 7 days
+    immutable: false,       // Files are content-addressed (UUID names never change)
     dotfiles: 'deny',
     index: false,          // No directory listing
-    setHeaders: (res, filePath) => {
-      // Force correct content-type for audio/video (important for mobile)
-      if (filePath.endsWith('.mp3'))  res.set('Content-Type', 'audio/mpeg');
-      if (filePath.endsWith('.ogg'))  res.set('Content-Type', 'audio/ogg');
-      if (filePath.endsWith('.m4a'))  res.set('Content-Type', 'audio/mp4');
-      if (filePath.endsWith('.aac'))  res.set('Content-Type', 'audio/aac');
-      if (filePath.endsWith('.mp4'))  res.set('Content-Type', 'video/mp4');
-      if (filePath.endsWith('.webm')) res.set('Content-Type', 'video/webm');
-      if (filePath.endsWith('.mov'))  res.set('Content-Type', 'video/quicktime');
-    },
+
   })
 );
 

@@ -1,22 +1,25 @@
+import type { Prisma } from '@prisma/client';
+import { z } from 'zod';
+import { isSharedMediaUrl } from '../config/media.js';
+import { createActivity, publishActivity, withdrawActivity } from './activity.service.js';
 import { prisma } from '../config/database.js';
 import { NotFoundError, ForbiddenError, ConflictError, ValidationError } from '../utils/errors.js';
-import { kafkaEvents } from '../kafka/producer.js';
 import { messageService } from './message.service.js';
 
 const postSelect = {
   id: true,
   content: true,
-  imageUrls: true,
+  imageUrls: true, mediaMetadata: true,
   videoUrl: true,
   createdAt: true,
   updatedAt: true,
   author: { select: { id: true, username: true, displayName: true, avatarUrl: true, isVerified: true } },
-  _count: { select: { likes: true, comments: true } },
+  _count: { select: { likes: true, comments: { where: { deletedAt: null } } } },
   shareCount: true,
 };
 
 const commentSelect = {
-  id: true,
+  id: true, postId: true, authorId: true,
   content: true,
   createdAt: true,
   repliedToId: true,
@@ -24,9 +27,15 @@ const commentSelect = {
 };
 
 export const postService = {
-  async createPost(authorId: string, data: { content: string; imageUrls?: string[]; videoUrl?: string | null }) {
+  async createPost(authorId: string, data: { content: string; imageUrls?: string[]; videoUrl?: string | null; mediaMetadata?: Prisma.InputJsonValue }) {
+    for (const url of [...(data.imageUrls ?? []), ...(data.videoUrl ? [data.videoUrl] : [])]) if (!isSharedMediaUrl(url)) throw new ValidationError('Invalid shared media URL');
+    if (!data.content?.trim() && !data.imageUrls?.length && !data.videoUrl) throw new ValidationError('Post content or media is required');
+    if (!data.mediaMetadata) {
+      const assets = await prisma.mediaAsset.findMany({ where: { url: { in: [...(data.imageUrls ?? []), ...(data.videoUrl ? [data.videoUrl] : [])] } } });
+      if (assets.length) data = { ...data, mediaMetadata: assets.map(a => ({ url: a.url, mimeType: a.mimeType, size: a.size })) };
+    }
     return prisma.post.create({
-      data: { ...data, authorId },
+      data: { ...data, content: data.content ?? '', imageUrls: data.imageUrls ?? [], authorId },
       select: postSelect,
     });
   },
@@ -43,7 +52,7 @@ export const postService = {
       prisma.post.findMany({
         where: { authorId: { in: authorIds }, deletedAt: null },
         select: postSelect,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * limit,
         take: limit,
       }),
@@ -92,7 +101,7 @@ export const postService = {
     return post;
   },
 
-  async updatePost(postId: string, userId: string, data: { content?: string; imageUrls?: string[]; videoUrl?: string | null }) {
+  async updatePost(postId: string, userId: string, data: { content?: string; imageUrls?: string[]; videoUrl?: string | null; mediaMetadata?: Prisma.InputJsonValue }) {
     const post = await prisma.post.findUnique({ where: { id: postId } });
     if (!post || post.deletedAt) throw new NotFoundError('Post');
     if (post.authorId !== userId) throw new ForbiddenError();
@@ -110,51 +119,90 @@ export const postService = {
     if (post.authorId !== userId) throw new ForbiddenError();
 
     // Soft delete
-    await prisma.post.update({ where: { id: postId }, data: { deletedAt: new Date() } });
+    await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR UPDATE`;
+      await tx.post.update({ where: { id: postId }, data: { deletedAt: new Date() } });
+      await withdrawActivity(tx, { OR: [{ postId }, { resourceId: postId, type: { in: ['LIKE', 'COMMENT', 'SHARE'] } }] });
+    });
+    await publishActivity();
     return { message: 'Post deleted' };
   },
 
   async likePost(postId: string, userId: string) {
-    const post = await prisma.post.findUnique({ where: { id: postId, deletedAt: null } });
-    if (!post) throw new NotFoundError('Post');
-
-    const existing = await prisma.like.findUnique({
-      where: { userId_postId: { userId, postId } },
+    await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR UPDATE`;
+      const post = await tx.post.findFirst({ where: { id: postId, deletedAt: null }, select: { authorId: true } });
+      if (!post) throw new NotFoundError('Post');
+      await tx.like.upsert({ where: { userId_postId: { userId, postId } }, create: { userId, postId }, update: {} });
+      await createActivity(tx, { type: 'LIKE', userId: post.authorId, actorId: userId,
+        content: 'liked your post', resourceId: postId, dedupeKey: `like:${postId}:${userId}` });
     });
-    if (existing) throw new ConflictError('Already liked');
-
-    await prisma.like.create({ data: { userId, postId } });
-
-    if (post.authorId !== userId) {
-      await prisma.notification.create({
-        data: { type: 'LIKE', content: 'liked your post', userId: post.authorId, actorId: userId, resourceId: postId },
-      });
-    }
-
+    await publishActivity();
     return { message: 'Post liked' };
   },
 
   async unlikePost(postId: string, userId: string) {
-    await prisma.like.deleteMany({ where: { userId, postId } });
+    await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR UPDATE`;
+      await tx.like.deleteMany({ where: { userId, postId } });
+      await withdrawActivity(tx, { actorId: userId, type: 'LIKE', OR: [{ postId }, { resourceId: postId }] });
+    });
+    await publishActivity();
     return { message: 'Post unliked' };
   },
 
-  async addComment(postId: string, authorId: string, content: string, repliedToId?: string | null) {
-    const post = await prisma.post.findUnique({ where: { id: postId, deletedAt: null } });
-    if (!post) throw new NotFoundError('Post');
-
-    const comment = await prisma.comment.create({
-      data: { content, authorId, postId, repliedToId: repliedToId ?? null },
-      select: commentSelect,
+  async addComment(postId: string, authorId: string, content: string, repliedToId?: string | null, clientRequestId?: string) {
+    content = z.string().trim().min(1).max(500).parse(content);
+    if (clientRequestId) z.string().uuid().parse(clientRequestId);
+    const comment = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR UPDATE`;
+      const post = await tx.post.findFirst({ where: { id: postId, deletedAt: null }, select: { authorId: true } });
+      if (!post) throw new NotFoundError('Post');
+      if (clientRequestId) {
+        const existing = await tx.comment.findUnique({ where: { authorId_clientRequestId: { authorId, clientRequestId } }, select: { ...commentSelect, deletedAt: true } });
+        if (existing) {
+          if (existing.postId !== postId || existing.content !== content || existing.repliedToId !== (repliedToId ?? null) || existing.deletedAt) throw new ConflictError('Comment retry key reused with different or deleted content');
+          const { deletedAt: _deletedAt, ...result } = existing;
+          return result;
+        }
+      }
+      const parent = repliedToId ? await tx.comment.findFirst({ where: { id: repliedToId, postId, deletedAt: null }, select: { authorId: true } }) : null;
+      if (repliedToId && !parent) throw new ValidationError('Invalid comment reply target');
+      const created = await tx.comment.create({ data: { content, authorId, postId, repliedToId: repliedToId ?? null, clientRequestId }, select: commentSelect });
+      for (const recipient of new Set([post.authorId, ...(parent ? [parent.authorId] : [])])) {
+        await createActivity(tx, { type: 'COMMENT', userId: recipient, actorId: authorId,
+          content: parent?.authorId === recipient ? 'replied to your comment' : 'commented on your post',
+          metadata: { interaction: parent?.authorId === recipient ? 'COMMENT_REPLY' : 'POST_COMMENT', ...(parent ? { repliedToId: repliedToId! } : {}) },
+          resourceId: postId, commentId: created.id, dedupeKey: `comment:${created.id}:${recipient}` });
+      }
+      return created;
     });
-
-    if (post.authorId !== authorId) {
-      await prisma.notification.create({
-        data: { type: 'COMMENT', content: 'commented on your post', userId: post.authorId, actorId: authorId, resourceId: postId },
-      });
-    }
-
+    await publishActivity();
     return comment;
+  },
+
+  async getComments(postId: string, requesterId: string, page: number, limit: number) {
+    if (!await prisma.post.findFirst({ where: { id: postId, deletedAt: null }, select: { id: true } })) throw new NotFoundError('Post');
+    const where = { postId, deletedAt: null };
+    const [comments, total] = await Promise.all([
+      prisma.comment.findMany({ where, select: commentSelect, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], skip: (page - 1) * limit, take: limit }),
+      prisma.comment.count({ where }),
+    ]);
+    return { comments: comments.map(c => ({ ...c, isMine: c.authorId === requesterId })), total };
+  },
+
+  async deleteComment(postId: string, commentId: string, userId: string) {
+    const result = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR UPDATE`;
+      const comment = await tx.comment.findFirst({ where: { id: commentId, postId, post: { deletedAt: null } }, select: { authorId: true, post: { select: { authorId: true } } } });
+      if (!comment) throw new NotFoundError('Comment');
+      if (comment.authorId !== userId && comment.post.authorId !== userId) throw new ForbiddenError('Cannot delete this comment');
+      await tx.comment.updateMany({ where: { id: commentId, deletedAt: null }, data: { deletedAt: new Date(), deletedBy: userId } });
+      await withdrawActivity(tx, { commentId });
+      return { commentId };
+    });
+    await publishActivity();
+    return result;
   },
 
   async savePost(postId: string, userId: string) {
@@ -181,8 +229,8 @@ export const postService = {
   async getSavedPosts(userId: string, page: number, limit: number) {
     const [saved, total] = await Promise.all([
       prisma.savedPost.findMany({
-        where: { userId },
-        orderBy: { createdAt: 'desc' },
+        where: { userId, post: { deletedAt: null } },
+        orderBy: [{ createdAt: 'desc' }, { postId: 'desc' }],
         skip: (page - 1) * limit,
         take: limit,
         include: {
@@ -193,7 +241,7 @@ export const postService = {
           },
         },
       }),
-      prisma.savedPost.count({ where: { userId } }),
+      prisma.savedPost.count({ where: { userId, post: { deletedAt: null } } }),
     ]);
 
     return { posts: saved.map((s) => s.post), total };
@@ -202,8 +250,8 @@ export const postService = {
   async getLikedPosts(userId: string, page: number, limit: number) {
     const [liked, total] = await Promise.all([
       prisma.like.findMany({
-        where: { userId },
-        orderBy: { createdAt: 'desc' },
+        where: { userId, post: { deletedAt: null } },
+        orderBy: [{ createdAt: 'desc' }, { postId: 'desc' }],
         skip: (page - 1) * limit,
         take: limit,
         include: {
@@ -214,7 +262,7 @@ export const postService = {
           },
         },
       }),
-      prisma.like.count({ where: { userId } }),
+      prisma.like.count({ where: { userId, post: { deletedAt: null } } }),
     ]);
 
     return { posts: liked.map((l) => l.post), total };
@@ -238,7 +286,7 @@ export const postService = {
         user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
         views: { where: { viewerId: userId } },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
 
     return stories;
@@ -255,7 +303,7 @@ export const postService = {
       prisma.post.findMany({
         where: { authorId: user.id, deletedAt: null },
         select: postSelect,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * limit,
         take: limit,
       }),
@@ -324,10 +372,19 @@ export const postService = {
     });
   },
 
+  async recordPostShare(tx: Prisma.TransactionClient, postId: string, actorId: string) {
+    await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR UPDATE`;
+    const post = await tx.post.findFirst({ where: { id: postId, deletedAt: null }, select: { authorId: true } });
+    if (!post) throw new NotFoundError('Post');
+    await tx.post.update({ where: { id: postId }, data: { shareCount: { increment: 1 } } });
+    await createActivity(tx, { type: 'SHARE', userId: post.authorId, actorId,
+      resourceId: postId, content: 'shared your post', dedupeKey: `share:${postId}:${actorId}` });
+  },
+
   async sharePost(postId: string, userId: string, conversationId: string) {
     const post = await prisma.post.findUnique({
       where: { id: postId, deletedAt: null },
-      select: { id: true, authorId: true, shareCount: true },
+      select: { id: true, authorId: true, shareCount: true, content: true, imageUrls: true, videoUrl: true },
     });
     if (!post) throw new NotFoundError('Post');
 
@@ -335,28 +392,11 @@ export const postService = {
       throw new ForbiddenError('Cannot share your own post');
     }
 
-    await prisma.post.update({
-      where: { id: postId },
-      data: { shareCount: { increment: 1 } },
-    });
-
-    await prisma.notification.create({
-      data: {
-        type: 'SHARE',
-        content: 'shared your post',
-        userId: post.authorId,
-        actorId: userId,
-        resourceId: postId,
-      },
-    });
-
-    await kafkaEvents.notification({
-      userId: post.authorId,
-      actorId: userId,
-      type: 'SHARE',
-      content: 'shared your post',
-      resourceId: postId,
-    });
+    await messageService.requireMember(conversationId, userId);
+    await messageService.sendMessage(conversationId, userId, post.id, undefined, {
+      type: 'SHARED_POST', sharedReference: { id: post.id, kind: 'post',
+        preview: { content: post.content, imageUrls: post.imageUrls, videoUrl: post.videoUrl } },
+    }, tx => this.recordPostShare(tx, postId, userId));
 
     return { postId, shareCount: post.shareCount + 1 };
   },
@@ -420,7 +460,7 @@ export const postService = {
   async sharePostToUser(postId: string, senderId: string, targetUsername: string) {
     const post = await prisma.post.findUnique({
       where: { id: postId, deletedAt: null },
-      select: { id: true, authorId: true, shareCount: true },
+      select: { id: true, authorId: true, shareCount: true, content: true, imageUrls: true, videoUrl: true },
     });
     if (!post) throw new NotFoundError('Post');
 
@@ -436,34 +476,10 @@ export const postService = {
 
     const conversation = await messageService.getOrCreateConversation(senderId, targetUser.id);
 
-    await prisma.post.update({
-      where: { id: postId },
-      data: { shareCount: { increment: 1 } },
-    });
-
-    await prisma.message.create({
-      data: {
-        content: post.id,
-        mediaUrl: null,
-        type: 'SHARED_POST',
-        status: 'SENT',
-        senderId,
-        receiverId: targetUser.id,
-        conversationId: conversation.id,
-      },
-    });
-
-    if (post.authorId !== senderId) {
-      await prisma.notification.create({
-        data: {
-          type: 'SHARE',
-          content: 'shared your post',
-          userId: post.authorId,
-          actorId: senderId,
-          resourceId: postId,
-        },
-      });
-    }
+    await messageService.sendMessage(conversation.id, senderId, post.id, targetUser.id, {
+      type: 'SHARED_POST', sharedReference: { id: post.id, kind: 'post',
+        preview: { content: post.content, imageUrls: post.imageUrls, videoUrl: post.videoUrl } },
+    }, tx => this.recordPostShare(tx, postId, senderId));
 
     return { postId, shareCount: post.shareCount + 1, conversationId: conversation.id };
   },

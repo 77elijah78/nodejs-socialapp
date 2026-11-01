@@ -1,12 +1,11 @@
 import { Server as HTTPServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
-import { verifyToken } from '../utils/jwt.js';
+import { authenticateSocket } from './authenticate.js';
 import { logger } from '../config/logger.js';
 import { pubClient, subClient } from '../config/redis.js';
 import { registerChatHandlers } from './chat.handler.js';
 import { registerPresenceHandlers } from './presence.handler.js';
-import { messageService } from '../services/message.service.js';
 
 export interface AuthenticatedSocket extends Socket {
   userId: string;
@@ -37,29 +36,17 @@ export const initSocket = async (httpServer: HTTPServer): Promise<Server> => {
     let recovering = false;
     client.on('reconnecting', () => { recovering = true; });
     client.on('ready', () => {
-      if (recovering) io.local.emit('receipts:resync');
+      if (recovering) {
+        io.local.emit('receipts:resync');
+        io.local.emit('notifications:sync', { reason: 'adapter-reconnected' });
+      }
       recovering = false;
     });
   }
   logger.info('✅ Socket.io Redis adapter attached');
 
   // ─── JWT Auth middleware ───────────────────────────────────
-  io.use((socket, next) => {
-    const token =
-      socket.handshake.auth?.token ??
-      socket.handshake.headers?.authorization?.replace('Bearer ', '');
-
-    if (!token) return next(new Error('Authentication required'));
-
-    try {
-      const payload = verifyToken(token);
-      (socket as AuthenticatedSocket).userId = payload.userId;
-      (socket as AuthenticatedSocket).username = payload.username;
-      next();
-    } catch {
-      next(new Error('Invalid token'));
-    }
-  });
+  io.use(authenticateSocket);
 
   // ─── Connection ───────────────────────────────────────────
   io.on('connection', (socket: Socket) => {
@@ -68,6 +55,7 @@ export const initSocket = async (httpServer: HTTPServer): Promise<Server> => {
 
     // Auto-join personal room
     authSocket.join(`user:${authSocket.userId}`);
+    authSocket.emit('notifications:sync', { reason: 'connected' });
 
     registerChatHandlers(io, authSocket);
     registerPresenceHandlers(io, authSocket);
