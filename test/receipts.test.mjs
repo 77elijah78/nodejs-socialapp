@@ -684,7 +684,7 @@ test('notifications migration and persisted outbox survive database close/reopen
   const pool=new pg.Pool(); pool.query=persistentQuery; pool.connect=async()=>Object.assign(new EventEmitter(),{query:persistentQuery,release(){}});
   let client=new PrismaClient({adapter:new PrismaPg(pool)});
   const recipient=randomUUID(); const actor=randomUUID(); const n=randomUUID(); const outbox=randomUUID();
-  const durableMessage=randomUUID(); const durablePush=randomUUID();
+  const durableMessage=randomUUID(); const durablePush=randomUUID(); const durableAction=randomUUID();
   try {
     for(const id of [recipient,actor]) await client.user.create({data:{id,username:id,email:`${id}@persist.dev`,passwordHash:'unused'}});
     await client.$transaction(async tx=>{
@@ -695,10 +695,12 @@ test('notifications migration and persisted outbox survive database close/reopen
     const device=await client.pushDevice.create({data:{userId:recipient,deviceId:randomUUID(),token:'ExpoPushToken[persistent_device]'}});
     await client.message.create({data:{id:durableMessage,content:'persisted message',senderId:actor,receiverId:recipient,conversationId:chat.id,receipts:{create:{userId:recipient}}}});
     await client.pushDelivery.create({data:{id:durablePush,messageId:durableMessage,deviceId:device.id,tokenVersion:1}});
+    await client.notificationReplyAction.create({data:{userId:recipient,actionId:durableAction,requestHash:'persisted-fingerprint',messageId:durableMessage}});
     await client.$disconnect(); await store.close();
     store=new PGlite(root); client=new PrismaClient({adapter:new PrismaPg(pool)});
     globalThis.__receiptTest.prisma=client;
     const {activityService: restarted}=await import(`../.cache/bundles/services/activity.service.js?restart=${randomUUID()}`);
+    assert.equal((await client.notificationReplyAction.findUnique({where:{userId_actionId:{userId:recipient,actionId:durableAction}}})).messageId,durableMessage);
     assert.equal((await client.pushDelivery.findUnique({where:{id:durablePush}})).status,'QUEUED');
     assert.equal((await client.pushDevice.findFirst({where:{userId:recipient}})).token,'ExpoPushToken[persistent_device]');
     const page=await restarted.listCursor(recipient,20);
@@ -792,6 +794,7 @@ async function duePush(messageId) { await prisma.pushDelivery.updateMany({where:
     assert.equal((await register(stranger,input)).status,409);
     assert.equal((await register(reader,{...registration(),projectId:randomUUID()})).status,409);
     assert.equal((await register(reader,{...registration(),token:'not-a-token'})).status,400);
+    assert.equal((await register(reader,{...registration(),deliveryMode:'unsupported'})).status,400);
     await fetch(`${base}/devices/${input.deviceId}`,{method:'DELETE',headers:headers(stranger)});
     assert.equal(await prisma.pushDevice.count({where:{deviceId:input.deviceId}}),1);
     const prefs=await(await fetch(`${base}/preferences`,{headers:headers(reader)})).json();assert.equal(prefs.data.pushPreviewsEnabled,false);
@@ -816,7 +819,7 @@ for(const groupMode of [false,true]) for(const type of ['TEXT','IMAGE','VIDEO','
     assert.equal(sends.length,expected);assert.ok(!sends.some(s=>s.to.includes('undefined')));
     for(const p of sends) {
       assert.equal(p.title,'New message');assert.equal(p.body,'You have a new message');
-      assert.deepEqual(Object.keys(p.data).sort(),['conversationId','conversationType','messageId','notificationId','notificationType','senderId'].sort());
+      assert.deepEqual(Object.keys(p.data).sort(),['contractVersion','recipientUserId','deviceId','groupKey','categoryIdentifier','deliveryMode','conversationId','conversationType','messageId','notificationId','notificationType','senderId'].sort());
       assert.equal(p.data.messageId,m.id);assert.equal(p.data.senderId,sender);assert.equal(p.data.conversationId,c.id);
       assert.equal(p.data.conversationType,groupMode?'group':'private');assert.equal(p.channelId,'messages');
       assert.ok(!JSON.stringify(p).includes('private text must not leak'));
@@ -990,4 +993,163 @@ test('push retry budget stops confirmed rejections and does not loop indefinitel
   setResponder(()=>new Response('',{status:429}));
   for(let i=0;i<6;i++){await duePush(m.id);await processPushDeliveries();}
   assert.equal(sends.length,5);const job=await prisma.pushDelivery.findFirst({where:{messageId:m.id}});assert.equal(job.status,'FAILED');assert.equal(job.attempts,5);
+}));
+
+async function notificationReplyFixture(isGroup=false) {
+  const input=registration(); await pushDeviceService.register(reader,input);
+  const c=await conversation(isGroup);
+  const original=await service.sendMessage(c.id,sender,'incoming',reader);
+  const job=await prisma.pushDelivery.findFirst({where:{messageId:original.id,device:{deviceId:input.deviceId}}});
+  const action={contractVersion:2,actionId:randomUUID(),recipientUserId:reader,deviceId:input.deviceId,notificationId:job.id};
+  const reply=(text='response',overrides={})=>service.replyMessage(c.id,reader,text,original.id,undefined,{notificationAction:{...action,...overrides}});
+  return {input,c,original,job,action,reply};
+}
+for(const groupMode of [false,true]) test(`notification reply ${groupMode?'group':'private'}: idempotent persistence, routing and not read`,async()=>withPush(async()=>{
+  await pushDeviceService.register(sender,registration()); if(groupMode) await pushDeviceService.register(third,registration());
+  const f=await notificationReplyFixture(groupMode);
+  const first=await f.reply();const jobs=await prisma.pushDelivery.count({where:{messageId:first.id}});
+  const outbox=await prisma.receiptOutbox.count();
+  assert.equal((await f.reply()).id,first.id);
+  assert.equal(await prisma.message.count({where:{conversationId:f.c.id,senderId:reader}}),1);
+  assert.equal(await prisma.notificationReplyAction.count({where:{userId:reader,actionId:f.action.actionId}}),1);
+  assert.equal(await prisma.receiptOutbox.count(),outbox);
+  assert.equal(await prisma.pushDelivery.count({where:{messageId:first.id}}),jobs);
+  assert.equal(jobs,groupMode?2:1);
+  const receipts=await prisma.messageReceipt.findMany({where:{messageId:first.id}});
+  assert.deepEqual(receipts.map(r=>r.userId).sort(),(groupMode?[sender,third]:[sender]).sort());
+  assert.equal((await prisma.messageReceipt.findUnique({where:{messageId_userId:{messageId:f.original.id,userId:reader}}})).readAt,null);
+  assert.equal((await prisma.conversationParticipant.findUnique({where:{conversationId_userId:{conversationId:f.c.id,userId:reader}}})).lastReadAt,null);
+  await assert.rejects(f.reply('different'),e=>e.statusCode===409);
+  await assert.rejects(prisma.notificationReplyAction.create({data:{userId:reader,actionId:f.action.actionId,requestHash:'other',messageId:randomUUID()}}),e=>e.code==='P2002');
+}));
+
+test('notification reply HTTP: lost post-commit response, retry same action and validation/authentication',async()=>withPush(async()=>{
+  const f=await notificationReplyFixture();const app=express();app.use(express.json());
+  let drop=true;
+  app.use((req,res,next)=>{if(drop){drop=false;res.json=()=>{res.socket.destroy();return res;};}next();});
+  app.use('/messages',router);
+  const {ZodError}=await import('zod');
+  app.use((err,req,res,next)=>res.status(err.statusCode??(err instanceof ZodError?400:500)).json({success:false,message:'Rejected'}));
+  const http=app.listen(0,'127.0.0.1');await new Promise(resolve=>http.on('listening',resolve));
+  const url=`http://127.0.0.1:${http.address().port}/messages/conversations/${f.c.id}/reply`;
+  const body={content:'sent after lost response',type:'TEXT',repliedToId:f.original.id,notificationAction:f.action};
+  const headers={Authorization:`Bearer ${jwt.sign({userId:reader,username:reader},process.env.JWT_SECRET)}`,'Content-Type':'application/json'};
+  const post=(data=body,auth=headers)=>fetch(url,{method:'POST',headers:auth,body:JSON.stringify(data)});
+  try {
+    await assert.rejects(post());
+    const ledger=await prisma.notificationReplyAction.findUnique({where:{userId_actionId:{userId:reader,actionId:f.action.actionId}}});assert.ok(ledger);
+    const response=await post();assert.equal(response.status,201);assert.equal((await response.json()).data.id,ledger.messageId);
+    assert.equal(await prisma.message.count({where:{conversationId:f.c.id,senderId:reader}}),1);
+    assert.equal((await post({...body,notificationAction:{...f.action,actionId:'bad'}})).status,400);
+    assert.equal((await post({...body,mediaUrl:'https://example.com/photo.jpg'})).status,400);
+    assert.equal((await post(body,{'Content-Type':'application/json'})).status,401);
+  } finally {await new Promise(resolve=>http.close(resolve));}
+}));
+
+test('notification reply: rollback includes action key, message, receipts and push/outbox intents',async()=>withPush(async()=>{
+  const f=await notificationReplyFixture();const before=await prisma.receiptOutbox.count();
+  await assert.rejects(service.sendMessage(f.c.id,reader,'response',undefined,{repliedToId:f.original.id,notificationAction:f.action},async()=>{throw new Error('injected transaction failure');}));
+  assert.equal(await prisma.notificationReplyAction.count({where:{userId:reader,actionId:f.action.actionId}}),0);
+  assert.equal(await prisma.message.count({where:{conversationId:f.c.id,senderId:reader}}),0);
+  assert.equal(await prisma.receiptOutbox.count(),before);
+  assert.ok((await f.reply()).id);
+}));
+
+test('notification reply: account/device/notification binding, logout, rotation and membership changes',async()=>withPush(async()=>{
+  const f=await notificationReplyFixture(true);
+  await assert.rejects(f.reply('response',{recipientUserId:sender}),e=>e.statusCode===403);
+  await assert.rejects(f.reply('response',{deviceId:randomUUID()}),e=>e.statusCode===403);
+  await assert.rejects(f.reply('response',{notificationId:randomUUID()}),e=>e.statusCode===403);
+  await assert.rejects(service.replyMessage(f.c.id,stranger,'attack',f.original.id,undefined,{notificationAction:{...f.action,recipientUserId:stranger}}));
+  const another=await conversation();const foreign=await service.sendMessage(another.id,sender,'other',reader);
+  await assert.rejects(service.replyMessage(another.id,reader,'attack',foreign.id,undefined,{notificationAction:f.action}),e=>e.statusCode===403);
+  await pushDeviceService.register(reader,{...f.input,token:registration().token});
+  const sent=await f.reply();assert.ok(sent.id);assert.equal((await f.reply()).id,sent.id);
+  await prisma.conversationParticipant.update({where:{conversationId_userId:{conversationId:f.c.id,userId:third}},data:{deletedAt:new Date()}});
+  const afterRemoval=await f.reply('second',{actionId:randomUUID()});
+  assert.deepEqual((await prisma.messageReceipt.findMany({where:{messageId:afterRemoval.id}})).map(r=>r.userId),[sender]);
+  await prisma.conversationParticipant.update({where:{conversationId_userId:{conversationId:f.c.id,userId:reader}},data:{deletedAt:new Date()}});
+  await assert.rejects(f.reply(),e=>e.statusCode===403);
+  await prisma.conversationParticipant.update({where:{conversationId_userId:{conversationId:f.c.id,userId:reader}},data:{deletedAt:null}});
+  await pushDeviceService.unregister(reader,f.input.deviceId);await assert.rejects(f.reply(),e=>e.statusCode===403);
+}));
+
+test('notification reply: deleted/hidden original rejected; deleted sent reply never recreated',async()=>withPush(async()=>{
+  const f=await notificationReplyFixture();const sent=await f.reply();
+  await prisma.message.delete({where:{id:sent.id}});
+  await assert.rejects(f.reply(),e=>e.statusCode===410);
+  assert.equal(await prisma.notificationReplyAction.count({where:{userId:reader,actionId:f.action.actionId}}),1);
+  await service.deleteMessage(f.original.id,reader,'me');
+  await assert.rejects(f.reply('new',{actionId:randomUUID()}),e=>e.statusCode===403);
+  await prisma.conversation.delete({where:{id:f.c.id}});
+  await assert.rejects(f.reply());
+  assert.equal(await prisma.notificationReplyAction.count({where:{userId:reader,actionId:f.action.actionId}}),1);
+}));
+
+test('push v2: opt-in data-only wire shape, per-conversation/account grouping, privacy, multiple devices and rollback to alerts',async()=>withPush(async({sends})=>{
+  const a={...registration(),deliveryMode:'android-data-v2'},b=registration();
+  await pushDeviceService.register(reader,a);await pushDeviceService.register(reader,b);await pushDeviceService.register(third,{...registration(),deliveryMode:'android-data-v2'});
+  const group=await conversation(true),dm=await conversation();
+  const messages=[];
+  for(const c of [group,group,dm]){const m=await service.sendMessage(c.id,sender,'secret preview',reader);messages.push(m);await duePush(m.id);await processPushDeliveries();}
+  const own=sends.filter(p=>p.data.recipientUserId===reader&&p.data.deviceId===a.deviceId);
+  assert.equal(own.length,3);assert.equal(own[0].data.groupKey,own[1].data.groupKey);assert.notEqual(own[0].data.groupKey,own[2].data.groupKey);
+  const other=sends.find(p=>p.data.recipientUserId===third);assert.notEqual(other.data.groupKey,own[0].data.groupKey);
+  for(const p of own){
+    assert.deepEqual(Object.keys(p).sort(),['_contentAvailable','data','priority','to','ttl'].sort());assert.equal(p._contentAvailable,true);
+    assert.equal(p.data.contractVersion,2);assert.equal(p.data.categoryIdentifier,'MESSAGE_REPLY_V2');
+    assert.equal(p.data.groupKey,`socialapp:v2:${reader}:${p.data.conversationId}`);
+    assert.deepEqual(p.data.display,{title:'New message',body:'You have a new message',channelId:'messages'});
+    assert.ok(!JSON.stringify(p).includes('secret preview'));assert.ok(!('collapseId' in p)&&!('tag' in p));
+    const peer=sends.find(s=>s.data.deviceId===b.deviceId&&s.data.messageId===p.data.messageId);
+    assert.equal(peer.data.groupKey,p.data.groupKey);assert.notEqual(peer.data.notificationId,p.data.notificationId);assert.equal(peer.data.deliveryMode,'expo-alert');
+  }
+  await pushDeviceService.updatePreferences(reader,{pushPreviewsEnabled:true});
+  const preview=await service.sendMessage(dm.id,sender,'opted in',reader);await duePush(preview.id);await processPushDeliveries();
+  assert.equal(sends.find(p=>p.data.messageId===preview.id&&p.data.deviceId===a.deviceId).data.display.body,'opted in');
+  await pushDeviceService.register(reader,a);assert.equal((await prisma.pushDevice.findUnique({where:{deviceId:a.deviceId}})).deliveryMode,'android-data-v2');
+  await pushDeviceService.register(reader,{...a,deliveryMode:undefined});
+  const fallback=await service.sendMessage(dm.id,sender,'fallback',reader);await duePush(fallback.id);await processPushDeliveries();
+  assert.equal(sends.find(p=>p.data.messageId===fallback.id&&p.data.deviceId===a.deviceId).data.deliveryMode,'expo-alert');
+  await pushDeviceService.updatePreferences(reader,{messagePushEnabled:false});
+  const optedOut=await service.sendMessage(dm.id,sender,'no push',reader);
+  assert.equal(await prisma.pushDelivery.count({where:{messageId:optedOut.id}}),0);
+}));
+
+test('notification reply: same-account second device cannot reuse action; distinct accounts can use same action UUID',async()=>withPush(async()=>{
+  const f=await notificationReplyFixture(true);const first=await f.reply();
+  const second=registration();await pushDeviceService.register(reader,second);
+  await assert.rejects(f.reply('response',{deviceId:second.deviceId}),e=>e.statusCode===409);
+  await pushDeviceService.register(third,registration());
+  const next=await service.sendMessage(f.c.id,sender,'second incoming',reader);
+  const job=await prisma.pushDelivery.findFirst({where:{messageId:next.id,device:{userId:third}} ,include:{device:true}});
+  const theirs=await service.replyMessage(f.c.id,third,'their response',next.id,undefined,{notificationAction:{...f.action,deviceId:job.device.deviceId,notificationId:job.id,recipientUserId:third}});
+  assert.notEqual(first.id,theirs.id);
+  assert.equal(await prisma.notificationReplyAction.count({where:{actionId:f.action.actionId}}),2);
+}));
+
+test('notification reply migration preserves legacy device/token and defaults to alert mode',async()=>{
+  const old=new PGlite();
+  try{
+    for(const dir of readdirSync('prisma/migrations').filter(d=>!d.endsWith('.toml')&&d!=='20261102000000_notification_reply_contract').sort())await old.exec(readFileSync(`prisma/migrations/${dir}/migration.sql`,'utf8'));
+    await old.exec(`INSERT INTO users(id,username,email,password_hash,updated_at) VALUES ('legacy','legacy','legacy@test.dev','unused',now());
+      INSERT INTO push_devices(id,user_id,device_id,token,token_version,updated_at) VALUES ('row','legacy','device','ExpoPushToken[legacy]',7,now());`);
+    await old.exec(readFileSync('prisma/migrations/20261102000000_notification_reply_contract/migration.sql','utf8'));
+    const {rows}=await old.query('SELECT * FROM push_devices');assert.equal(rows.length,1);assert.equal(rows[0].token,'ExpoPushToken[legacy]');assert.equal(rows[0].token_version,7);assert.equal(rows[0].delivery_mode,'expo-alert');
+    assert.equal((await old.query('SELECT * FROM notification_reply_actions')).rows.length,0);
+  }finally{await old.close();}
+});
+
+test('notification reply: actual HTTP timeout after commit safely retries the same action',async()=>withPush(async()=>{
+  const f=await notificationReplyFixture();const app=express();app.use(express.json());let stall=true;
+  app.use((req,res,next)=>{if(stall){stall=false;res.json=()=>res;}next();});app.use('/messages',router);
+  const http=app.listen(0,'127.0.0.1');await new Promise(resolve=>http.on('listening',resolve));
+  const url=`http://127.0.0.1:${http.address().port}/messages/conversations/${f.c.id}/reply`;
+  const init={method:'POST',headers:{Authorization:`Bearer ${jwt.sign({userId:reader,username:reader},process.env.JWT_SECRET)}`,'Content-Type':'application/json'},body:JSON.stringify({content:'timeout response',repliedToId:f.original.id,notificationAction:f.action})};
+  try{
+    await assert.rejects(fetch(url,{...init,signal:AbortSignal.timeout(1000)}),e=>e.name==='TimeoutError');
+    const ledger=await prisma.notificationReplyAction.findUnique({where:{userId_actionId:{userId:reader,actionId:f.action.actionId}}});assert.ok(ledger);
+    const retry=await fetch(url,init);assert.equal(retry.status,201);assert.equal((await retry.json()).data.id,ledger.messageId);
+    assert.equal(await prisma.message.count({where:{conversationId:f.c.id,senderId:reader}}),1);
+  }finally{http.closeAllConnections();await new Promise(resolve=>http.close(resolve));}
 }));

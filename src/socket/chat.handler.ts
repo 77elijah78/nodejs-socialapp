@@ -108,7 +108,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
 
       ack?.({ success: true, messageId: message.id, message });
     } catch (err) {
-      logger.error('message:send error', err);
+      logger.error('message:send error');
       ack?.({ success: false, error: (err as Error).message });
     }
   });
@@ -130,7 +130,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
 
       ack?.({ success: true, messageId: message.id, message });
     } catch (err) {
-      logger.error('message:reply error', err);
+      logger.error('message:reply error');
       ack?.({ success: false, error: (err as Error).message });
     }
   });

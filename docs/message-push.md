@@ -1,3 +1,7 @@
+# Android inline reply and conversation stacking
+
+See [the v2 Android contract and frontend handoff](android-notification-replies.md) for the additive reply idempotency migration, per-device data-only opt-in, SDK source verification and device-testing gate. Existing alert delivery remains the default.
+
 # Real-time and Android push messaging notifications
 
 ## Scope / audit

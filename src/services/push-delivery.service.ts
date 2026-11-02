@@ -4,7 +4,7 @@ import { prisma } from '../config/database.js';
 import { pushEnabled } from '../config/push.js';
 import { logger } from '../config/logger.js';
 import { isDeviceViewing } from './delivery-state.service.js';
-import { sendExpoPush, getExpoReceipt, PushProviderError, type ExpoPushPayload } from './expo-push.provider.js';
+import { sendExpoPush, getExpoReceipt, PushProviderError, type MessagePushData, type ExpoPushPayload } from './expo-push.provider.js';
 
 const DAY = 86400000;
 const RETRY_LIMIT = 5;
@@ -64,14 +64,22 @@ async function processDelivery(id: string, claimToken: string) {
   const previews: Record<string, string> = { IMAGE: 'Sent a photo', VIDEO: 'Sent a video', AUDIO: 'Sent a voice message',
     DOCUMENT: 'Sent a document', SHARED_POST: 'Shared a post', SHARED_STORY: 'Shared a story' };
   const senderName = message.sender.displayName || message.sender.username;
-  const payload: ExpoPushPayload = {
-    to: device.token, title: user.pushPreviewsEnabled
-      ? (message.conversation.isGroup ? `${senderName} · ${message.conversation.groupName || 'Group conversation'}` : senderName).slice(0, 128)
-      : 'New message',
-    body: user.pushPreviewsEnabled ? (previews[message.type] ?? (message.content.slice(0, 160) || 'Sent a message')) : 'You have a new message',
-    sound: 'default', channelId: 'messages', priority: 'high', ttl: 3600,
-    data: { messageId: message.id, conversationId: message.conversationId, senderId: message.senderId,
-      conversationType: message.conversation.isGroup ? 'group' : 'private', notificationType: 'MESSAGE', notificationId: job.id },
+  const title = user.pushPreviewsEnabled
+    ? (message.conversation.isGroup ? `${senderName} · ${message.conversation.groupName || 'Group conversation'}` : senderName).slice(0, 128)
+    : 'New message';
+  const body = user.pushPreviewsEnabled ? (previews[message.type] ?? (message.content.slice(0, 160) || 'Sent a message')) : 'You have a new message';
+  const data: MessagePushData = {
+    contractVersion: 2, messageId: message.id, conversationId: message.conversationId, senderId: message.senderId,
+    conversationType: message.conversation.isGroup ? 'group' : 'private', notificationType: 'MESSAGE', notificationId: job.id,
+    recipientUserId: device.userId, deviceId: device.deviceId,
+    groupKey: `socialapp:v2:${device.userId}:${message.conversationId}`, categoryIdentifier: 'MESSAGE_REPLY_V2',
+  };
+  const payload: ExpoPushPayload = device.deliveryMode === 'android-data-v2' ? {
+    to: device.token, priority: 'high', ttl: 3600, _contentAvailable: true,
+    data: { ...data, deliveryMode: 'android-data-v2', display: { title, body, channelId: 'messages' } },
+  } : {
+    to: device.token, title, body, sound: 'default', channelId: 'messages', priority: 'high', ttl: 3600,
+    data: { ...data, deliveryMode: 'expo-alert' },
   };
   try {
     const ticketId = await sendExpoPush(payload);

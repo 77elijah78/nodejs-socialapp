@@ -4,7 +4,7 @@ import { pushEnabled } from '../config/push.js';
 import { AppError, ConflictError } from '../utils/errors.js';
 
 export const pushDeviceService = {
-  async register(userId: string, input: { deviceId: string; token: string; platform: 'android'; projectId: string }) {
+  async register(userId: string, input: { deviceId: string; token: string; platform: 'android'; projectId: string; deliveryMode?: 'expo-alert' | 'android-data-v2' }) {
     if (!pushEnabled()) throw new AppError('Push notifications are not enabled', 503);
     if (input.projectId !== process.env.EXPO_PROJECT_ID) throw new ConflictError('Push project does not match this application');
     try {
@@ -15,13 +15,13 @@ export const pushDeviceService = {
         const existing = conflicts.find(d => d.deviceId === input.deviceId);
         if (!existing && await tx.pushDevice.count({ where: { userId } }) >= 20) throw new ConflictError('Device limit reached');
         const device = existing ? await tx.pushDevice.update({ where: { id: existing.id }, data: {
-          token: input.token, enabled: true, invalidatedAt: null,
+          token: input.token, deliveryMode: input.deliveryMode ?? 'expo-alert', enabled: true, invalidatedAt: null,
           ...(existing.token !== input.token || !existing.enabled ? { tokenVersion: { increment: 1 } } : {}),
-        } }) : await tx.pushDevice.create({ data: { userId, deviceId: input.deviceId, token: input.token, platform: input.platform } });
+        } }) : await tx.pushDevice.create({ data: { userId, deviceId: input.deviceId, token: input.token, platform: input.platform, deliveryMode: input.deliveryMode ?? 'expo-alert' } });
         if (existing && device.tokenVersion !== existing.tokenVersion) await tx.pushDelivery.updateMany({
           where: { deviceId: device.id, status: 'QUEUED' }, data: { tokenVersion: device.tokenVersion },
         });
-        return { deviceId: device.deviceId, platform: device.platform, enabled: device.enabled, updatedAt: device.updatedAt };
+        return { deviceId: device.deviceId, platform: device.platform, deliveryMode: device.deliveryMode, enabled: device.enabled, updatedAt: device.updatedAt };
       });
     } catch (error) {
       if ((error as { code?: string }).code === 'P2002') throw new ConflictError('Device or token is already registered');

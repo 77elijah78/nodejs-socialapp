@@ -8,6 +8,7 @@ import { sendSuccess } from '../utils/response.js';
 import { pushDeviceService } from '../services/push-device.service.js';
 
 export const pushTokenInput = z.object({ deviceId: z.string().uuid(), platform: z.literal('android'),
+  deliveryMode: z.enum(['expo-alert', 'android-data-v2']).default('expo-alert'),
   projectId: z.string().uuid(), token: z.string().max(256).regex(/^(ExpoPushToken|ExponentPushToken)\[[A-Za-z0-9_-]+\]$/),
 });
 const router = Router();

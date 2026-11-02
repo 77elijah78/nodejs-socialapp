@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto';
 import { isSharedMediaUrl } from '../config/media.js';
 import { enqueueMessagePush } from './push-device.service.js';
 import { z } from 'zod';
 import { messageInclude, serializeMessage } from './message.dto.js';
 import { prisma } from '../config/database.js';
-import { NotFoundError, ForbiddenError, ValidationError } from '../utils/errors.js';
+import { AppError, ConflictError, NotFoundError, ForbiddenError, ValidationError } from '../utils/errors.js';
 import { kafkaEvents } from '../kafka/producer.js';
 import { logger } from '../config/logger.js';
 import { publishReceipts } from './receipt-outbox.service.js';
@@ -22,8 +23,8 @@ async function requireMember(conversationId: string, userId: string) {
   } });
   if (!member || member.deletedAt) throw new ForbiddenError('Not an active participant');
 }
-async function recipientsFor(conversationId: string, senderId: string, receiverId?: string) {
-  const conversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId },
+async function recipientsFor(conversationId: string, senderId: string, receiverId?: string, db: Prisma.TransactionClient = prisma) {
+  const conversation = await db.conversation.findUniqueOrThrow({ where: { id: conversationId },
     include: { participants: { where: { deletedAt: null } } } });
   const recipients = conversation.participants.filter(p => p.userId !== senderId).map(p => p.userId);
   if (!recipients.length || (receiverId && !recipients.includes(receiverId)) ||
@@ -38,6 +39,10 @@ async function receiptDTOs<T extends { id: string; conversationId: string; delet
   return messages.map(m => ({ ...serializeMessage(m), isGroup: conversations.find(c => c.id === m.conversationId)?.isGroup ?? false,
     readByMe: !!receipts.find(r => r.messageId === m.id)?.readAt }));
 }
+
+export type NotificationReplyAction = {
+  contractVersion: 2; actionId: string; recipientUserId: string; deviceId: string; notificationId: string;
+};
 
 export const messageService = {
   async getOrCreateConversation(userAId: string, userBId: string) {
@@ -180,6 +185,7 @@ export const messageService = {
       fileMimeType?: string | null;
       fileSize?: number | null;
       sharedReference?: Prisma.InputJsonValue;
+      notificationAction?: NotificationReplyAction;
     },
     afterPersist?: (tx: Prisma.TransactionClient) => Promise<void>,
   ) {
@@ -198,13 +204,52 @@ export const messageService = {
           fileName: options.fileName ?? asset.key.split('/').pop(), thumbnailUrl: options.thumbnailUrl ?? thumbnail?.url };
       }
     }
-    const { recipients, isGroup } = await recipientsFor(conversationId, senderId, receiverId);
+    // Message, idempotency tombstone, receipts and publication intents commit together.
+    const result = await prisma.$transaction(async tx => {
+    const action = options?.notificationAction;
+    if (action) {
+      z.object({ contractVersion: z.literal(2), actionId: z.string().uuid(), recipientUserId: z.string().uuid(),
+        deviceId: z.string().uuid(), notificationId: z.string().uuid() }).strict().parse(action);
+      if (action.recipientUserId !== senderId) throw new ForbiddenError('Notification account mismatch');
+      if (!content?.trim() || content.length > 5000 || (options?.type && options.type !== 'TEXT') ||
+        options?.mediaUrl || options?.thumbnailUrl || options?.duration != null || options?.fileName ||
+        options?.fileMimeType || options?.fileSize != null || options?.sharedReference || options?.forwardedFromId || !options?.repliedToId)
+        throw new ValidationError('Notification replies must contain text only');
+      // Serializes retries across processes/devices before testing the unique action key.
+      await tx.$queryRaw`SELECT id FROM users WHERE id=${senderId} FOR NO KEY UPDATE`;
+      await tx.$queryRaw`SELECT id FROM push_devices WHERE device_id=${action.deviceId} FOR SHARE`;
+      const device = await tx.pushDevice.findFirst({ where: { deviceId: action.deviceId, userId: senderId, enabled: true, token: { not: null },
+        user: { deletedAt: null, accountStatus: 'ACTIVE' } } });
+      if (!device) throw new ForbiddenError('Notification device is not registered');
+    }
+    // Lock existing participant rows so removal/deletion cannot race this send.
+    await tx.$queryRaw`SELECT user_id FROM conversation_participants WHERE conversation_id=${conversationId} ORDER BY user_id FOR SHARE`;
+    const currentMember = await tx.conversationParticipant.findUnique({ where: { conversationId_userId: { conversationId, userId: senderId } } });
+    if (!currentMember || currentMember.deletedAt) throw new ForbiddenError('Not an active participant');
+    const { recipients, isGroup } = await recipientsFor(conversationId, senderId, receiverId, tx);
+    const requestHash = action ? createHash('sha256').update(JSON.stringify([
+      conversationId, content, receiverId ?? null, options?.repliedToId, action.contractVersion, action.actionId, action.recipientUserId, action.deviceId, action.notificationId,
+    ])).digest('hex') : null;
+    if (action) {
+      const previous = await tx.notificationReplyAction.findUnique({ where: { userId_actionId: { userId: senderId, actionId: action.actionId } } });
+      if (previous) {
+        if (previous.requestHash !== requestHash) throw new ConflictError('Action ID was used for another request');
+        const existing = await tx.message.findUnique({ where: { id: previous.messageId }, include: messageInclude });
+        if (!existing || existing.deletedAt) throw new AppError('Reply is no longer available', 410);
+        return { ...serializeMessage(existing), isGroup, readByMe: false };
+      }
+      await tx.$queryRaw`SELECT id FROM messages WHERE id=${options!.repliedToId!} FOR SHARE`;
+      const notification = await tx.pushDelivery.findFirst({ where: { id: action.notificationId,
+        device: { deviceId: action.deviceId, userId: senderId }, messageId: options!.repliedToId!,
+        message: { conversationId, deletedAt: null, senderId: { not: senderId },
+          deletions: { none: { userId: senderId } }, receipts: { some: { userId: senderId } } },
+      } });
+      if (!notification) throw new ForbiddenError('Notification is not available for this account and conversation');
+    }
     if (options?.repliedToId) {
-      const original = await prisma.message.findUnique({ where: { id: options.repliedToId }, select: { conversationId: true } });
+      const original = await tx.message.findUnique({ where: { id: options.repliedToId }, select: { conversationId: true } });
       if (!original || original.conversationId !== conversationId) throw new ValidationError('Invalid reply target');
     }
-    // Message, receipts and publication intents commit together.
-    const result = await prisma.$transaction(async tx => {
     // 1. Persist to PostgreSQL
     const message = await tx.message.create({
       data: {
@@ -254,11 +299,14 @@ export const messageService = {
       repliedToType: message.repliedTo?.type ?? null,
     } })) } });
 
+    if (action) await tx.notificationReplyAction.create({ data: {
+      userId: senderId, actionId: action.actionId, requestHash: requestHash!, messageId: message.id,
+    } });
     await enqueueMessagePush(tx, message.id, recipients);
     if (afterPersist) await afterPersist(tx);
     return { ...serializeMessage(message), isGroup, readByMe: false };
     });
-    await publishReceipts().catch(error => logger.error('Message outbox will retry', error));
+    await publishReceipts().catch(() => logger.error('Message outbox will retry'));
     return result;
   },
 
@@ -461,6 +509,7 @@ export const messageService = {
     repliedToId: string,
     receiverId?: string,
     options?: {
+      notificationAction?: NotificationReplyAction;
       mediaUrl?: string | null;
       thumbnailUrl?: string | null;
       type?: MessageType;

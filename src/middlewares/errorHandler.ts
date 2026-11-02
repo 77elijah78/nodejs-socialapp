@@ -10,7 +10,8 @@ export const errorHandler = (
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _next: NextFunction
 ): void => {
-  logger.error(err.message, { stack: err.stack });
+  // Prisma/runtime errors may embed submitted text or credentials. Never log raw errors.
+  logger.error('Request failed', { errorType: err instanceof AppError ? 'application' : err instanceof ZodError ? 'validation' : 'unexpected' });
 
   if (err instanceof AppError) {
     res.status(err.statusCode).json({
@@ -40,6 +41,6 @@ export const errorHandler = (
   res.status(500).json({
     success: false,
     message:
-      process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message,
+      'Internal server error',
   });
 };

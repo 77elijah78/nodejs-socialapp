@@ -25,8 +25,8 @@ export async function publishReceipts(id?: string): Promise<void> {
         await publishers[payload.kind](payload.event!);
       } else await kafkaEvents.messageRead(row.payload as MessageReadEvent);
       await prisma.receiptOutbox.deleteMany({ where: { id: row.id, claimToken: token } });
-    } catch (error) {
-      logger.error('Receipt publication retained for retry', error);
+    } catch {
+      logger.error('Receipt publication retained for retry');
       await prisma.receiptOutbox.updateMany({
         where: { id: row.id, claimToken: token },
         data: { claimToken: null, leaseUntil: null,
@@ -41,7 +41,7 @@ export function startReceiptPublisher() {
   let timer: ReturnType<typeof setTimeout>;
   let active: Promise<void> = Promise.resolve();
   const run = () => {
-    active = publishReceipts().catch(error => logger.error('Receipt worker failed', error))
+    active = publishReceipts().catch(() => logger.error('Receipt worker failed'))
       .then(() => { if (!stopped) timer = setTimeout(run, 1000); });
   };
   run();

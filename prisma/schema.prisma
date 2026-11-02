@@ -79,6 +79,7 @@ model PushDevice {
   deviceId String @unique @map("device_id")
   token String? @unique
   tokenVersion Int @default(1) @map("token_version")
+  deliveryMode String @default("expo-alert") @map("delivery_mode")
   platform String @default("android")
   enabled Boolean @default(true)
   invalidatedAt DateTime? @map("invalidated_at")
@@ -113,7 +114,20 @@ model PushDelivery {
   @@map("push_deliveries")
 }
 
+// Durable idempotency tombstones survive message/conversation deletion.
+model NotificationReplyAction {
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  actionId String @map("action_id")
+  requestHash String @map("request_hash")
+  messageId String @map("message_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@id([userId, actionId])
+  @@map("notification_reply_actions")
+}
+
 model User {
+  notificationReplyActions NotificationReplyAction[]
   pushDevices PushDevice[]
   messagePushEnabled Boolean @default(true) @map("message_push_enabled")
   pushPreviewsEnabled Boolean @default(false) @map("push_previews_enabled")

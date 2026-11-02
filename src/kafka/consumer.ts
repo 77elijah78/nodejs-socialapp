@@ -51,7 +51,7 @@ export async function connectConsumer(io: Server): Promise<void> {
         const payload = JSON.parse(message.value.toString());
         await routeEvent(io, topic, payload);
       } catch (err) {
-        logger.error(`Consumer error [${topic}]`, err);
+        logger.error(`Consumer error [${topic}]`);
         throw err;
       }
     },

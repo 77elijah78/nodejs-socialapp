@@ -125,6 +125,10 @@ export const forwardMessageSchema = z.object({
 
 export const replyMessageSchema = z.object({
   body: z.object({
+    notificationAction: z.object({
+      contractVersion: z.literal(2), actionId: z.string().uuid(),
+      recipientUserId: z.string().uuid(), deviceId: z.string().uuid(), notificationId: z.string().uuid(),
+    }).strict().optional(),
     content: z.string().max(5000).optional(),
     mediaUrl: mediaUrl.optional(),
     thumbnailUrl: mediaUrl.optional(),
@@ -139,7 +143,10 @@ export const replyMessageSchema = z.object({
   }).refine(
     (data) => data.content || data.mediaUrl,
     { message: 'Either content or mediaUrl must be provided' }
-  ),
+  ).refine(data => !data.notificationAction || (
+    !!data.content?.trim() && (!data.type || data.type === 'TEXT') && !data.mediaUrl && !data.thumbnailUrl &&
+    data.duration === undefined && !data.fileName && !data.fileMimeType && data.fileSize === undefined && !data.sharedReference
+  ), { message: 'Notification replies must contain text only' }),
   params: z.object({ conversationId: z.string().uuid() }),
 });
 

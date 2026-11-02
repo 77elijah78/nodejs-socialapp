@@ -42,7 +42,7 @@ export async function publishEvent<T extends object>(
       ],
     });
   } catch (err) {
-    logger.error(`Failed to publish to ${topic}`, err);
+    logger.error(`Failed to publish to ${topic}`);
     throw err;
   }
 }

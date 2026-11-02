@@ -7,11 +7,23 @@ const responseItem = z.discriminatedUnion('status', [
   z.object({ status: z.literal('ok'), id: z.string().optional() }),
   z.object({ status: z.literal('error'), details: z.object({ error: z.string().max(100) }).optional() }),
 ]);
-export type ExpoPushPayload = {
-  to: string; title: string; body: string; sound: 'default'; channelId: 'messages';
-  priority: 'high'; ttl: number; data: { messageId: string; conversationId: string;
-    conversationType: 'private' | 'group'; senderId: string; notificationType: 'MESSAGE'; notificationId: string };
+export type MessagePushData = {
+  contractVersion: 2; notificationType: 'MESSAGE';
+  messageId: string; conversationId: string; conversationType: 'private' | 'group'; senderId: string;
+  notificationId: string; recipientUserId: string; deviceId: string;
+  groupKey: string; categoryIdentifier: 'MESSAGE_REPLY_V2';
 };
+export type ExpoPushPayload = {
+  to: string; priority: 'high'; ttl: number;
+} & ({
+  title: string; body: string; sound: 'default'; channelId: 'messages';
+  data: MessagePushData & { deliveryMode: 'expo-alert' };
+} | {
+  // No top-level display fields: the frontend must render exactly once.
+  _contentAvailable: true;
+  data: MessagePushData & { deliveryMode: 'android-data-v2';
+    display: { title: string; body: string; channelId: 'messages' } };
+});
 async function request(path: 'send' | 'getReceipts', body: object) {
   let response: Response;
   try {
