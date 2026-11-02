@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { validatePushConfig } from './config/push.js';
+import { startPushPublisher } from './services/push-delivery.service.js';
 import { createServer } from 'http';
 import app from './app.js';
 import { initSocket } from './socket/index.js';
@@ -9,9 +11,12 @@ import { connectProducer, disconnectProducer } from './kafka/producer.js';
 import { connectConsumer, disconnectConsumer } from './kafka/consumer.js';
 import { adminSettingsService } from './admin/settings.service.js';
 
+import { startReceiptPublisher } from './services/receipt-outbox.service.js';
+
 const PORT = process.env.PORT ?? 3000;
 
 async function bootstrap() {
+  validatePushConfig();
   // 1. Database
   await prisma.$connect();
   logger.info('✅ Database connected');
@@ -28,6 +33,8 @@ async function bootstrap() {
 
   // 4. Kafka consumer (needs io reference to emit events)
   await connectConsumer(io);
+  const stopReceiptPublisher = startReceiptPublisher();
+  const stopPushPublisher = startPushPublisher();
 
   httpServer.listen({ port: PORT, hostname: '0.0.0.0' }, () => {
     logger.info(`🚀 Server running on http://0.0.0.0:${PORT}`);
@@ -37,13 +44,14 @@ async function bootstrap() {
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`${signal} received — shutting down gracefully`);
+    await new Promise<void>(resolve => { io.close(() => resolve()); });
+    await stopReceiptPublisher();
+    await stopPushPublisher();
     await disconnectConsumer();
     await disconnectProducer();
     await prisma.$disconnect();
-    httpServer.close(() => {
-      logger.info('HTTP server closed');
-      process.exit(0);
-    });
+    logger.info('HTTP server closed');
+    process.exit(0);
   };
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));

@@ -1,7 +1,48 @@
+import { createHash } from 'node:crypto';
+import { isSharedMediaUrl } from '../config/media.js';
+import { enqueueMessagePush } from './push-device.service.js';
+import { z } from 'zod';
+import { messageInclude, serializeMessage } from './message.dto.js';
 import { prisma } from '../config/database.js';
-import { NotFoundError, ForbiddenError, ValidationError } from '../utils/errors.js';
+import { AppError, ConflictError, NotFoundError, ForbiddenError, ValidationError } from '../utils/errors.js';
 import { kafkaEvents } from '../kafka/producer.js';
-import { MessageStatus } from '../types/index.js';
+import { logger } from '../config/logger.js';
+import { publishReceipts } from './receipt-outbox.service.js';
+import { Prisma, type MessageType } from '@prisma/client';
+
+
+function eligible(userId: string) {
+  return { deletions: { none: { userId } }, senderId: { not: userId }, deletedAt: null,
+    conversation: { participants: { some: { userId, deletedAt: null } } },
+    OR: [{ receiverId: userId }, { conversation: { isGroup: true } }],
+  };
+}
+async function requireMember(conversationId: string, userId: string) {
+  const member = await prisma.conversationParticipant.findUnique({ where: {
+    conversationId_userId: { conversationId, userId },
+  } });
+  if (!member || member.deletedAt) throw new ForbiddenError('Not an active participant');
+}
+async function recipientsFor(conversationId: string, senderId: string, receiverId?: string, db: Prisma.TransactionClient = prisma) {
+  const conversation = await db.conversation.findUniqueOrThrow({ where: { id: conversationId },
+    include: { participants: { where: { deletedAt: null } } } });
+  const recipients = conversation.participants.filter(p => p.userId !== senderId).map(p => p.userId);
+  if (!recipients.length || (receiverId && !recipients.includes(receiverId)) ||
+    (!conversation.isGroup && recipients.length !== 1)) throw new ValidationError('Invalid recipients');
+  return { recipients, isGroup: conversation.isGroup };
+}
+async function receiptDTOs<T extends { id: string; conversationId: string; deletedAt?: Date | null }>(messages: T[], userId: string) {
+  const [receipts, conversations] = await Promise.all([
+    prisma.messageReceipt.findMany({ where: { userId, messageId: { in: messages.map(m => m.id) } } }),
+    prisma.conversation.findMany({ where: { id: { in: messages.map(m => m.conversationId) } }, select: { id: true, isGroup: true } }),
+  ]);
+  return messages.map(m => ({ ...serializeMessage(m), isGroup: conversations.find(c => c.id === m.conversationId)?.isGroup ?? false,
+    readByMe: !!receipts.find(r => r.messageId === m.id)?.readAt }));
+}
+
+export type NotificationReplyAction = {
+  contractVersion: 2; actionId: string; recipientUserId: string; deviceId: string; notificationId: string;
+};
 
 export const messageService = {
   async getOrCreateConversation(userAId: string, userBId: string) {
@@ -62,7 +103,7 @@ export const messageService = {
   },
 
   async getUserConversations(userId: string) {
-    return prisma.conversation.findMany({
+    const conversations = await prisma.conversation.findMany({
       where: {
         participants: { some: { userId, deletedAt: null } },
       },
@@ -73,10 +114,14 @@ export const messageService = {
             user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
           },
         },
-        messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+        messages: { where: { deletions: { none: { userId } } }, include: messageInclude, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1 },
       },
       orderBy: { updatedAt: 'desc' },
     });
+    return Promise.all(conversations.map(async conversation => ({ ...conversation, messages: conversation.messages.map(serializeMessage),
+      unreadCount: await prisma.messageReceipt.count({ where: { userId, readAt: null,
+        message: { conversationId: conversation.id, deletedAt: null, deletions: { none: { userId } } } } }),
+    })));
   },
 
   async getMessages(
@@ -93,61 +138,35 @@ export const messageService = {
     if (!participant) throw new ForbiddenError('Not a participant in this conversation');
     if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
 
-    let cursorFilter: any = {};
+    let cursorFilter: Prisma.MessageWhereInput = {};
     if (cursorId) {
       const cursorMessage = await prisma.message.findUnique({
         where: { id: cursorId },
-        select: { createdAt: true },
+        select: { createdAt: true, conversationId: true },
       });
-      if (cursorMessage) {
-        cursorFilter = { createdAt: { lt: cursorMessage.createdAt } };
-      }
-    } else if (before) {
+      if (!cursorMessage || cursorMessage.conversationId !== conversationId) throw new ValidationError('Invalid conversation cursor');
+      cursorFilter = { OR: [ { createdAt: { lt: cursorMessage.createdAt } }, { createdAt: cursorMessage.createdAt, id: { lt: cursorId } } ] };
+    } else if (before !== undefined) {
+      if (!Number.isFinite(before) || !Number.isFinite(new Date(before).getTime())) throw new ValidationError('Invalid history timestamp');
       cursorFilter = { createdAt: { lt: new Date(before) } };
     }
 
-    const where: any = { conversationId, ...cursorFilter };
+    const where: Prisma.MessageWhereInput = { conversationId, deletions: { none: { userId } }, ...cursorFilter };
 
     const [messages, total] = await Promise.all([
       prisma.message.findMany({
         where,
-        include: {
-          sender: { select: { id: true, username: true, avatarUrl: true } },
-          repliedTo: {
-            select: {
-              id: true,
-              content: true,
-              senderId: true,
-              type: true,
-              sender: { select: { username: true, avatarUrl: true } },
-            },
-          },
-        },
-        orderBy: { createdAt: 'desc' },
+        include: messageInclude,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: page > 1 && !cursorId && !before ? (page - 1) * limit : 0,
         take: limit,
       }),
       prisma.message.count({ where }),
     ]);
 
-    const lastMessage = messages[messages.length - 1];
     const nextCursor = messages.length === limit ? messages[messages.length - 1]?.id : undefined;
 
-    // Mark read + publish Kafka event
-    await prisma.conversationParticipant.update({
-      where: { conversationId_userId: { conversationId, userId } },
-      data: { lastReadAt: new Date() },
-    });
-
-    await kafkaEvents.messageRead({
-      conversationId,
-      userId,
-      messageId: lastMessage?.id,
-      senderId: lastMessage?.senderId,
-      readAt: new Date().toISOString(),
-    });
-
-    return { messages: messages.reverse(), total, nextCursor };
+    return { messages: await receiptDTOs(messages.reverse(), userId), total, nextCursor };
   },
 
   async sendMessage(
@@ -156,66 +175,118 @@ export const messageService = {
     content: string,
     receiverId?: string,
     options?: {
-      type?: MessageStatus;
+      type?: MessageType;
       mediaUrl?: string | null;
       thumbnailUrl?: string | null;
       duration?: number | null;
       repliedToId?: string | null;
       forwardedFromId?: string | null;
-    }
+      fileName?: string | null;
+      fileMimeType?: string | null;
+      fileSize?: number | null;
+      sharedReference?: Prisma.InputJsonValue;
+      notificationAction?: NotificationReplyAction;
+    },
+    afterPersist?: (tx: Prisma.TransactionClient) => Promise<void>,
   ) {
+    for (const url of [options?.mediaUrl, options?.thumbnailUrl]) if (url && !isSharedMediaUrl(url)) throw new ValidationError('Invalid shared media URL');
     const participant = await prisma.conversationParticipant.findUnique({
       where: { conversationId_userId: { conversationId, userId: senderId } },
     });
     if (!participant) throw new ForbiddenError('Not a participant in this conversation');
     if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
 
+    if (options?.mediaUrl) {
+      const asset = await prisma.mediaAsset.findUnique({ where: { url: options.mediaUrl } });
+      if (asset) {
+        const thumbnail = await prisma.mediaAsset.findFirst({ where: { sourceUrl: asset.url }, select: { url: true } });
+        options = { ...options, fileMimeType: asset.mimeType, fileSize: asset.size,
+          fileName: options.fileName ?? asset.key.split('/').pop(), thumbnailUrl: options.thumbnailUrl ?? thumbnail?.url };
+      }
+    }
+    // Message, idempotency tombstone, receipts and publication intents commit together.
+    const result = await prisma.$transaction(async tx => {
+    const action = options?.notificationAction;
+    if (action) {
+      z.object({ contractVersion: z.literal(2), actionId: z.string().uuid(), recipientUserId: z.string().uuid(),
+        deviceId: z.string().uuid(), notificationId: z.string().uuid() }).strict().parse(action);
+      if (action.recipientUserId !== senderId) throw new ForbiddenError('Notification account mismatch');
+      if (!content?.trim() || content.length > 5000 || (options?.type && options.type !== 'TEXT') ||
+        options?.mediaUrl || options?.thumbnailUrl || options?.duration != null || options?.fileName ||
+        options?.fileMimeType || options?.fileSize != null || options?.sharedReference || options?.forwardedFromId || !options?.repliedToId)
+        throw new ValidationError('Notification replies must contain text only');
+      // Serializes retries across processes/devices before testing the unique action key.
+      await tx.$queryRaw`SELECT id FROM users WHERE id=${senderId} FOR NO KEY UPDATE`;
+      await tx.$queryRaw`SELECT id FROM push_devices WHERE device_id=${action.deviceId} FOR SHARE`;
+      const device = await tx.pushDevice.findFirst({ where: { deviceId: action.deviceId, userId: senderId, enabled: true, token: { not: null },
+        user: { deletedAt: null, accountStatus: 'ACTIVE' } } });
+      if (!device) throw new ForbiddenError('Notification device is not registered');
+    }
+    // Lock existing participant rows so removal/deletion cannot race this send.
+    await tx.$queryRaw`SELECT user_id FROM conversation_participants WHERE conversation_id=${conversationId} ORDER BY user_id FOR SHARE`;
+    const currentMember = await tx.conversationParticipant.findUnique({ where: { conversationId_userId: { conversationId, userId: senderId } } });
+    if (!currentMember || currentMember.deletedAt) throw new ForbiddenError('Not an active participant');
+    const { recipients, isGroup } = await recipientsFor(conversationId, senderId, receiverId, tx);
+    const requestHash = action ? createHash('sha256').update(JSON.stringify([
+      conversationId, content, receiverId ?? null, options?.repliedToId, action.contractVersion, action.actionId, action.recipientUserId, action.deviceId, action.notificationId,
+    ])).digest('hex') : null;
+    if (action) {
+      const previous = await tx.notificationReplyAction.findUnique({ where: { userId_actionId: { userId: senderId, actionId: action.actionId } } });
+      if (previous) {
+        if (previous.requestHash !== requestHash) throw new ConflictError('Action ID was used for another request');
+        const existing = await tx.message.findUnique({ where: { id: previous.messageId }, include: messageInclude });
+        if (!existing || existing.deletedAt) throw new AppError('Reply is no longer available', 410);
+        return { ...serializeMessage(existing), isGroup, readByMe: false };
+      }
+      await tx.$queryRaw`SELECT id FROM messages WHERE id=${options!.repliedToId!} FOR SHARE`;
+      const notification = await tx.pushDelivery.findFirst({ where: { id: action.notificationId,
+        device: { deviceId: action.deviceId, userId: senderId }, messageId: options!.repliedToId!,
+        message: { conversationId, deletedAt: null, senderId: { not: senderId },
+          deletions: { none: { userId: senderId } }, receipts: { some: { userId: senderId } } },
+      } });
+      if (!notification) throw new ForbiddenError('Notification is not available for this account and conversation');
+    }
+    if (options?.repliedToId) {
+      const original = await tx.message.findUnique({ where: { id: options.repliedToId }, select: { conversationId: true } });
+      if (!original || original.conversationId !== conversationId) throw new ValidationError('Invalid reply target');
+    }
     // 1. Persist to PostgreSQL
-    const message = await prisma.message.create({
+    const message = await tx.message.create({
       data: {
-        content,
+        content: content ?? '',
+        fileName: options?.fileName, fileMimeType: options?.fileMimeType,
+        fileSize: options?.fileSize, sharedReference: options?.sharedReference,
         mediaUrl: options?.mediaUrl ?? null,
         thumbnailUrl: options?.thumbnailUrl ?? null,
-        type: (options?.type as any) ?? 'TEXT',
+        type: options?.type ?? 'TEXT',
         status: 'SENT',
         senderId,
-        receiverId: receiverId ?? null,
+        receiverId: recipients.length === 1 ? recipients[0] : null,
         conversationId,
         duration: options?.duration ?? null,
         repliedToId: options?.repliedToId ?? null,
         forwardedFromId: options?.forwardedFromId ?? null,
+        receipts: { create: recipients.map(userId => ({ userId })) },
       },
-      include: {
-        sender: { select: { id: true, username: true, avatarUrl: true } },
-        repliedTo: {
-          select: {
-            id: true,
-            content: true,
-            senderId: true,
-            type: true,
-            sender: { select: { username: true, avatarUrl: true } },
-          },
-        },
-      },
+      include: messageInclude,
     });
 
-    await prisma.conversation.update({
+    await tx.conversation.update({
       where: { id: conversationId },
       data: { updatedAt: new Date() },
     });
 
-    if (!receiverId) {
-      throw new ValidationError('receiverId is required for chat messages');
-    }
 
     // 2. Publish to Kafka → consumer will emit via Socket.io
-    await kafkaEvents.chatMessage({
+    for (const recipientId of recipients) await tx.receiptOutbox.create({ data: { payload: JSON.parse(JSON.stringify({ kind: 'chatMessage', event: {
+      message: { ...serializeMessage(message), isGroup, readByMe: false },
       messageId: message.id,
       conversationId,
       senderId,
       senderUsername: message.sender.username,
       senderAvatarUrl: message.sender.avatarUrl,
-      receiverId,
+      receiverId: recipientId,
+      isGroup,
       content,
       mediaUrl: message.mediaUrl,
       thumbnailUrl: message.thumbnailUrl,
@@ -226,14 +297,24 @@ export const messageService = {
       repliedToSenderId: message.repliedTo?.senderId ?? null,
       repliedToSenderUsername: message.repliedTo?.sender?.username ?? null,
       repliedToType: message.repliedTo?.type ?? null,
-    });
+    } })) } });
 
-    return message;
+    if (action) await tx.notificationReplyAction.create({ data: {
+      userId: senderId, actionId: action.actionId, requestHash: requestHash!, messageId: message.id,
+    } });
+    await enqueueMessagePush(tx, message.id, recipients);
+    if (afterPersist) await afterPersist(tx);
+    return { ...serializeMessage(message), isGroup, readByMe: false };
+    });
+    await publishReceipts().catch(() => logger.error('Message outbox will retry'));
+    return result;
   },
 
   async editMessage(messageId: string, userId: string, newContent: string) {
     const message = await prisma.message.findUnique({ where: { id: messageId } });
     if (!message) throw new NotFoundError('Message');
+    await requireMember(message.conversationId, userId);
+    if (message.deletedAt) throw new ValidationError('Cannot edit deleted message');
     if (message.senderId !== userId) throw new ForbiddenError('Cannot edit someone else\'s message');
 
     const updated = await prisma.message.update({
@@ -255,281 +336,139 @@ export const messageService = {
     return updated;
   },
 
-  async deleteMessage(messageId: string, userId: string, deleteFor: 'me' | 'everyone') {
-    const message = await prisma.message.findUnique({ where: { id: messageId } });
-    if (!message) throw new NotFoundError('Message');
-    if (message.senderId !== userId) throw new ForbiddenError('Cannot delete someone else\'s message');
+  async requireMember(conversationId: string, userId: string) { await requireMember(conversationId, userId); },
 
-    const now = new Date();
+  async deleteMessage(messageId: string, userId: string, deleteFor: 'me' | 'everyone', conversationId?: string) {
+    z.enum(['me', 'everyone']).parse(deleteFor);
+    const result = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM messages WHERE id=${messageId} FOR UPDATE`;
+      const message = await tx.message.findUnique({ where: { id: messageId } });
+      if (!message) throw new NotFoundError('Message');
+      if (conversationId && message.conversationId !== conversationId) throw new ValidationError('Message is not in conversation');
+      const member = await tx.conversationParticipant.findUnique({ where: {
+        conversationId_userId: { conversationId: message.conversationId, userId },
+      } });
+      if (!member || member.deletedAt) throw new ForbiddenError('Not an active participant');
+      const now = new Date();
+      let event;
+      let kind;
+      if (deleteFor === 'everyone') {
+        if (message.senderId !== userId) throw new ForbiddenError('Only the sender can delete for everyone');
+        if (!message.deletedAt) await tx.message.update({ where: { id: messageId }, data: {
+          content: '', mediaUrl: null, thumbnailUrl: null, duration: null, fileName: null,
+          fileMimeType: null, fileSize: null, sharedReference: Prisma.JsonNull,
+          deletedAt: now, deletedBy: userId,
+        } });
+        kind = 'messageDeleted';
+        event = { messageId, conversationId: message.conversationId, deletedAt: (message.deletedAt ?? now).toISOString(), deletedBy: userId };
+      } else {
+        await tx.messageDeletion.upsert({ where: { messageId_userId: { messageId, userId } },
+          create: { messageId, userId }, update: {} });
+        kind = 'messageDeletedForMe';
+        event = { messageId, conversationId: message.conversationId, userId };
+      }
+      await tx.receiptOutbox.create({ data: { payload: { kind, event } } });
+      return { messageId, deleteFor };
+    });
+    await publishReceipts().catch(error => logger.error('Deletion outbox will retry', error));
+    return result;
+  },
 
-    if (deleteFor === 'everyone') {
-      // Hard delete for everyone — replace content with tombstone
-      await prisma.message.update({
-        where: { id: messageId },
-        data: {
-          content: '',
-          mediaUrl: null,
-          deletedAt: now,
-          deletedBy: userId,
-        },
-      });
-      await kafkaEvents.messageDeleted({
-        messageId,
-        conversationId: message.conversationId,
-        deletedAt: now.toISOString(),
-        deletedBy: userId,
-      });
-    } else {
-      // Soft-delete for sender only — keep in DB but notify client
-      await kafkaEvents.messageDeletedForMe({
-        messageId,
-        conversationId: message.conversationId,
-        userId,
-      });
+  async deleteMessages(conversationId: string, userId: string, messageIds: string[], deleteFor: 'me' | 'everyone') {
+    await requireMember(conversationId, userId);
+    const results = [];
+    for (const messageId of [...new Set(messageIds)]) {
+      try { results.push({ ...await this.deleteMessage(messageId, userId, deleteFor, conversationId), success: true }); }
+      catch (error) { results.push({ messageId, success: false, error: (error as Error).message }); }
     }
-
-    return { messageId, deleteFor };
+    return { conversationId, deleteFor, results };
   },
 
   async markMessagesDelivered(messageIds: string[], userId: string) {
-    const messages = await prisma.message.findMany({
-      where: {
-        id: { in: messageIds },
-        receiverId: userId,
-        status: { in: ['SENT', 'SENDING'] },
-      },
-      select: { id: true, conversationId: true, senderId: true },
+    const messages = await prisma.message.findMany({ where: {
+      id: { in: messageIds }, ...eligible(userId),
+      receipts: { some: { userId, deliveredAt: null, readAt: null } },
+    } });
+    const now = new Date();
+    await prisma.$transaction(async tx => {
+      await tx.message.updateMany({ where: {
+        id: { in: messages.map(m => m.id) }, status: { in: ['SENT', 'SENDING'] }, isRead: false,
+      }, data: { status: 'DELIVERED', deliveredAt: now } });
+      await tx.messageReceipt.updateMany({ where: {
+        messageId: { in: messages.map(m => m.id) }, userId, readAt: null, deliveredAt: null,
+      }, data: { deliveredAt: now } });
+      for (const msg of messages) await tx.receiptOutbox.create({ data: { payload: {
+        kind: 'messageDelivered', event: { messageId: msg.id, conversationId: msg.conversationId,
+          senderId: msg.senderId, userId, deliveredAt: now.toISOString() },
+      } } });
     });
-
-    await prisma.message.updateMany({
-      where: {
-        id: { in: messageIds },
-        receiverId: userId,
-        status: { in: ['SENT', 'SENDING'] },
-      },
-      data: { status: 'DELIVERED' as any, deliveredAt: new Date() },
-    });
-
-    for (const msg of messages) {
-      await kafkaEvents.messageDelivered({
-        messageId: msg.id,
-        conversationId: msg.conversationId,
-        userId,
-        senderId: msg.senderId,
-        deliveredAt: new Date().toISOString(),
-      });
-    }
-
-    return messages;
-  },
-
-  async markMessagesDeliveredByConversation(conversationId: string, userId: string) {
-    const messages = await prisma.message.findMany({
-      where: {
-        conversationId,
-        receiverId: userId,
-        status: { in: ['SENT', 'SENDING'] },
-      },
-      select: { id: true, conversationId: true, senderId: true },
-    });
-
-    if (messages.length === 0) {
-      return [];
-    }
-
-    await prisma.message.updateMany({
-      where: {
-        conversationId,
-        receiverId: userId,
-        status: { in: ['SENT', 'SENDING'] },
-      },
-      data: { status: 'DELIVERED' as any, deliveredAt: new Date() },
-    });
-
-    for (const msg of messages) {
-      await kafkaEvents.messageDelivered({
-        messageId: msg.id,
-        conversationId: msg.conversationId,
-        userId,
-        senderId: msg.senderId,
-        deliveredAt: new Date().toISOString(),
-      });
-    }
-
+    await publishReceipts().catch(error => logger.error('Delivery outbox will retry', error));
     return messages;
   },
 
   async markAllMessagesDelivered(userId: string) {
-    const conversations = await prisma.conversationParticipant.findMany({
-      where: { userId, deletedAt: null },
-      select: { conversationId: true },
-    });
-
-    const conversationIds = conversations.map(c => c.conversationId);
-
-    const messages = await prisma.message.findMany({
-      where: {
-        conversationId: { in: conversationIds },
-        receiverId: userId,
-        status: { in: ['SENT', 'SENDING'] },
-      },
-      select: { id: true, conversationId: true, senderId: true },
-    });
-
-    if (messages.length === 0) {
-      return [];
-    }
-
-    await prisma.message.updateMany({
-      where: {
-        id: { in: messages.map(m => m.id) },
-      },
-      data: { status: 'DELIVERED' as any, deliveredAt: new Date() },
-    });
-
-    for (const msg of messages) {
-      await kafkaEvents.messageDelivered({
-        messageId: msg.id,
-        conversationId: msg.conversationId,
-        userId,
-        senderId: msg.senderId,
-        deliveredAt: new Date().toISOString(),
-      });
-    }
-
-    return messages;
+    const messages = await prisma.message.findMany({ where: {
+      ...eligible(userId), receipts: { some: { userId, deliveredAt: null, readAt: null } },
+    }, select: { id: true } });
+    return this.markMessagesDelivered(messages.map(m => m.id), userId);
   },
 
   async getPendingDeliveryMessages(userId: string, limit = 50) {
-    const messages = await prisma.message.findMany({
-      where: {
-        receiverId: userId,
-        status: { in: ['SENT', 'SENDING'] },
-        conversation: {
-          participants: {
-            some: {
-              userId,
-              deletedAt: null,
-            },
-          },
-        },
-      },
-      select: {
-        id: true,
-        content: true,
-        mediaUrl: true,
-        thumbnailUrl: true,
-        type: true,
-        status: true,
-        senderId: true,
-        receiverId: true,
-        conversationId: true,
-        isRead: true,
-        createdAt: true,
-        editedAt: true,
-        deletedAt: true,
-        deletedBy: true,
-        duration: true,
-        repliedToId: true,
-        forwardedFromId: true,
-        sender: {
-          select: { id: true, username: true, avatarUrl: true },
-        },
-      },
-      orderBy: { createdAt: 'asc' },
-      take: limit,
-    });
-
-    return messages;
+    const messages = await prisma.message.findMany({ where: {
+      ...eligible(userId), receipts: { some: { userId, deliveredAt: null, readAt: null } },
+    }, include: messageInclude,
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: Number.isFinite(limit) ? Math.max(1, Math.min(200, Math.trunc(limit))) : 50 });
+    return receiptDTOs(messages, userId);
   },
 
+  async syncReceipts(userId: string, messageIds: string[]) {
+    const messages = await prisma.message.findMany({ where: {
+      id: { in: messageIds }, senderId: userId, deletions: { none: { userId } },
+      conversation: { participants: { some: { userId, deletedAt: null } } },
+    }, select: { id: true, conversationId: true, status: true, deletedAt: true, deletedBy: true } });
+    return messages.map(({ id, deletedAt, deletedBy, ...rest }) => ({ messageId: id, ...rest, ...(deletedAt ? { deletedAt, deletedBy } : {}) }));
+  },
+
+  // Explicit bulk action only; never invoked by visibility or history fetching.
   async markMessagesRead(conversationId: string, userId: string) {
-    const participant = await prisma.conversationParticipant.findUnique({
-      where: { conversationId_userId: { conversationId, userId } },
-    });
-    if (!participant) throw new ForbiddenError('Not a participant');
-    if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
-
-    const unreadMessages = await prisma.message.findMany({
-      where: {
-        conversationId,
-        receiverId: userId,
-        isRead: false,
-      },
-      select: { id: true, senderId: true },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    await prisma.message.updateMany({
-      where: {
-        conversationId,
-        receiverId: userId,
-        isRead: false,
-      },
-      data: { isRead: true, status: 'READ' as any },
-    });
-
-    await prisma.conversationParticipant.update({
-      where: { conversationId_userId: { conversationId, userId } },
-      data: { lastReadAt: new Date() },
-    });
-
-    for (const msg of unreadMessages) {
-      await kafkaEvents.messageRead({
-        conversationId,
-        userId,
-        messageId: msg.id,
-        senderId: msg.senderId,
-        readAt: new Date().toISOString(),
-      });
-    }
-
-    return {
-      lastReadMessageId: unreadMessages[0]?.id ?? null,
-      count: unreadMessages.length,
-    };
+    await requireMember(conversationId, userId);
+    const messages = await prisma.message.findMany({ where: {
+      conversationId, ...eligible(userId), receipts: { some: { userId, readAt: null } },
+    }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] });
+    for (const message of messages) await this.markMessageRead(conversationId, userId, message.id);
+    return { lastReadMessageId: messages[0]?.id ?? null, count: messages.length };
   },
 
   async markMessageRead(conversationId: string, userId: string, messageId: string) {
-    const participant = await prisma.conversationParticipant.findUnique({
-      where: { conversationId_userId: { conversationId, userId } },
+    const result = await prisma.$transaction(async tx => {
+      // Row locking serializes read/delete races and duplicate ACKs.
+      await tx.$queryRaw`SELECT id FROM messages WHERE id=${messageId} FOR UPDATE`;
+      const participant = await tx.conversationParticipant.findUnique({
+        where: { conversationId_userId: { conversationId, userId } },
+      });
+      if (!participant || participant.deletedAt) throw new ForbiddenError('Not an active participant');
+      const message = await tx.message.findFirst({ where: {
+        id: messageId, conversationId, ...eligible(userId),
+        receipts: { some: { userId } },
+      } });
+      if (!message) throw new ForbiddenError('Not an eligible recipient');
+      const key = { messageId_userId: { messageId, userId } };
+      await tx.messageReceipt.updateMany({ where: { messageId, userId, readAt: null },
+        data: { readAt: new Date() } });
+      await tx.messageReceipt.updateMany({ where: { messageId, userId, deliveredAt: null }, data: { deliveredAt: new Date() } });
+      const receipt = await tx.messageReceipt.findUniqueOrThrow({ where: key });
+      await tx.message.update({ where: { id: messageId }, data: { status: 'READ', isRead: true } });
+      const payload = { conversationId, messageId, userId, senderId: message.senderId,
+        readAt: receipt.readAt!.toISOString() };
+      const outbox = await tx.receiptOutbox.create({ data: { payload } });
+      return { outboxId: outbox.id, read: true, ...payload };
     });
-    if (!participant) throw new ForbiddenError('Not a participant');
-    if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
-
-    const message = await prisma.message.findFirst({
-      where: {
-        id: messageId,
-        conversationId,
-        receiverId: userId,
-        isRead: false,
-      },
-      select: { id: true, senderId: true },
+    // Committed state survives publication failure; the worker retries the intent.
+    await publishReceipts(result.outboxId).catch(error => {
+      logger.error('Immediate receipt publication failed; committed outbox will retry', error);
     });
-
-    if (!message) {
-      return { read: false };
-    }
-
-    await prisma.message.update({
-      where: { id: messageId },
-      data: { isRead: true, status: 'READ' as any },
-    });
-
-    await prisma.conversationParticipant.update({
-      where: { conversationId_userId: { conversationId, userId } },
-      data: { lastReadAt: new Date() },
-    });
-
-    await kafkaEvents.messageRead({
-      conversationId,
-      userId,
-      messageId: message.id,
-      senderId: message.senderId,
-      readAt: new Date().toISOString(),
-    });
-
-    return { read: true };
+    return result;
   },
 
   async forwardMessage(messageId: string, senderId: string, targetConversationId: string) {
@@ -545,29 +484,15 @@ export const messageService = {
     if (!participant) throw new ForbiddenError('Not a participant in target conversation');
     if (participant.deletedAt) throw new ForbiddenError('You have deleted this conversation');
 
-    const forwarded = await prisma.message.create({
-      data: {
-        content: original.content,
-        mediaUrl: original.mediaUrl,
-        thumbnailUrl: original.thumbnailUrl,
-        type: original.type,
-        status: 'SENT',
-        senderId,
-        conversationId: targetConversationId,
-        duration: original.duration,
-        forwardedFromId: original.id,
-      },
-      include: {
-        sender: { select: { id: true, username: true, avatarUrl: true } },
-      },
+    await requireMember(original.conversationId, senderId);
+    if (original.deletedAt) throw new ValidationError('Deleted forward target');
+    const { recipients } = await recipientsFor(targetConversationId, senderId);
+    return this.sendMessage(targetConversationId, senderId, original.content, recipients[0], {
+      mediaUrl: original.mediaUrl, thumbnailUrl: original.thumbnailUrl,
+      type: original.type, duration: original.duration, forwardedFromId: original.id,
+      fileName: original.fileName, fileMimeType: original.fileMimeType, fileSize: original.fileSize,
+      sharedReference: original.sharedReference as Prisma.InputJsonValue ?? undefined,
     });
-
-    await prisma.conversation.update({
-      where: { id: targetConversationId },
-      data: { updatedAt: new Date() },
-    });
-
-    return forwarded;
   },
 
   async getRepliedMessage(messageId: string) {
@@ -584,9 +509,10 @@ export const messageService = {
     repliedToId: string,
     receiverId?: string,
     options?: {
+      notificationAction?: NotificationReplyAction;
       mediaUrl?: string | null;
       thumbnailUrl?: string | null;
-      type?: MessageStatus;
+      type?: MessageType;
       duration?: number | null;
     }
   ) {
@@ -604,62 +530,7 @@ export const messageService = {
       throw new ValidationError('Invalid reply target');
     }
 
-    const message = await prisma.message.create({
-      data: {
-        content,
-        mediaUrl: options?.mediaUrl ?? null,
-        thumbnailUrl: options?.thumbnailUrl ?? null,
-        type: (options?.type as any) ?? 'TEXT',
-        status: 'SENT',
-        senderId,
-        receiverId: receiverId ?? null,
-        conversationId,
-        repliedToId,
-        duration: options?.duration ?? null,
-      },
-      include: {
-        sender: { select: { id: true, username: true, avatarUrl: true } },
-        repliedTo: {
-          select: {
-            id: true,
-            content: true,
-            senderId: true,
-            type: true,
-            sender: { select: { username: true, avatarUrl: true } },
-          },
-        },
-      },
-    });
-
-    await prisma.conversation.update({
-      where: { id: conversationId },
-      data: { updatedAt: new Date() },
-    });
-
-    if (!receiverId) {
-      throw new ValidationError('receiverId is required for chat messages');
-    }
-
-    await kafkaEvents.chatMessage({
-      messageId: message.id,
-      conversationId,
-      senderId,
-      senderUsername: message.sender.username,
-      senderAvatarUrl: message.sender.avatarUrl,
-      receiverId,
-      content,
-      mediaUrl: message.mediaUrl,
-      thumbnailUrl: message.thumbnailUrl,
-      type: message.type,
-      createdAt: message.createdAt.toISOString(),
-      repliedToId: message.repliedToId,
-      repliedToContent: message.repliedTo?.content ?? null,
-      repliedToSenderId: message.repliedTo?.senderId ?? null,
-      repliedToSenderUsername: message.repliedTo?.sender?.username ?? null,
-      repliedToType: message.repliedTo?.type ?? null,
-    });
-
-    return message;
+    return this.sendMessage(conversationId, senderId, content, receiverId, { ...options, repliedToId });
   },
 
   async deleteConversation(conversationId: string, userId: string) {

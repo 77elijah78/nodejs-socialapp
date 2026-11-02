@@ -42,7 +42,7 @@ export async function publishEvent<T extends object>(
       ],
     });
   } catch (err) {
-    logger.error(`Failed to publish to ${topic}`, err);
+    logger.error(`Failed to publish to ${topic}`);
     throw err;
   }
 }
@@ -52,12 +52,14 @@ export async function publishEvent<T extends object>(
 import { TOPICS } from '../config/kafka.js';
 
 export interface ChatMessageEvent {
+  message?: Record<string, unknown>;
   messageId: string;
   conversationId: string;
   senderId: string;
   senderUsername: string;
   senderAvatarUrl: string | null;
   receiverId: string;
+  isGroup?: boolean;
   content: string;
   mediaUrl?: string | null;
   thumbnailUrl?: string | null;
@@ -71,10 +73,16 @@ export interface ChatMessageEvent {
 }
 
 export interface NotificationEvent {
+  id?: string;
+  commentId?: string;
+  createdAt?: string;
   userId: string;
-  actorId: string;
-  type: 'LIKE' | 'COMMENT' | 'FOLLOW' | 'MESSAGE' | 'MENTION' | 'SHARE';
-  content: string;
+  actorId?: string | null;
+  version?: number;
+  operation?: 'updated' | 'sync';
+  reason?: string;
+  type?: 'LIKE' | 'COMMENT' | 'FOLLOW' | 'MESSAGE' | 'MENTION' | 'SHARE';
+  content?: string;
   resourceId?: string;
 }
 
@@ -88,7 +96,7 @@ export interface PresenceEvent {
 export interface MessageReadEvent {
   conversationId: string;
   userId: string;
-  messageId?: string;
+  messageId: string;
   senderId: string;
   readAt: string;
 }
@@ -130,6 +138,12 @@ export interface ConversationDeletedEvent {
 export const kafkaEvents = {
   chatMessage: (event: ChatMessageEvent) =>
     publishEvent(TOPICS.CHAT_MESSAGES, event, event.conversationId),
+
+  notificationState: (event: NotificationEvent) =>
+    publishEvent(TOPICS.NOTIFICATIONS, { ...event, operation: 'sync' }, event.userId),
+
+  notificationUpdated: (event: NotificationEvent) =>
+    publishEvent(TOPICS.NOTIFICATIONS, { ...event, operation: 'updated' }, event.userId),
 
   notification: (event: NotificationEvent) =>
     publishEvent(TOPICS.NOTIFICATIONS, event, event.userId),

@@ -17,6 +17,9 @@ services:
       KAFKA_BROKERS: kafka:29092
       KAFKA_CLIENT_ID: social-backend
       KAFKA_GROUP_ID: social-backend-group
+      PUSH_ENABLED: ${PUSH_ENABLED:-false}
+      EXPO_PROJECT_ID: ${EXPO_PROJECT_ID:-}
+      EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
       JWT_SECRET: dev-super-secret-change-in-prod
       JWT_ACCESS_EXPIRES: 15m
       JWT_REFRESH_EXPIRES: 7d

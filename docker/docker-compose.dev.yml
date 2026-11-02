@@ -17,13 +17,17 @@ services:
       KAFKA_BROKERS: kafka:29092
       KAFKA_CLIENT_ID: social-backend
       KAFKA_GROUP_ID: social-backend-group
+      PUSH_ENABLED: ${PUSH_ENABLED:-true}
+      EXPO_PROJECT_ID: ${EXPO_PROJECT_ID:-fa49de58-e64b-450a-9401-1f29da85af02}
+      EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-9usxcrrwnTwQ980iIw51ZNIzo8wMEm7zqAE4te5k}
       JWT_SECRET: dev-super-secret-change-in-prod
       JWT_ACCESS_EXPIRES: 15m
       JWT_REFRESH_EXPIRES: 7d
       CORS_ORIGIN: "*"
       LOG_LEVEL: debug
       UPLOADS_PATH: /app/uploads
-      BASE_URL: http://192.168.1.2:3000
+      BASE_URL: http://192.168.1.4:3000
+      PUBLIC_MEDIA_BASE_URL: http://192.168.1.4:3000/uploads
       RATE_LIMIT_WINDOW_MS: 60000
       RATE_LIMIT_MAX: 1000
     volumes:

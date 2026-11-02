@@ -8,6 +8,7 @@ export interface JwtPayload {
 }
 
 const ACCESS_SECRET = process.env.JWT_SECRET ?? 'changeme';
+if (process.env.NODE_ENV === 'production' && (!process.env.JWT_SECRET || ACCESS_SECRET.length < 32 || /change.?me/i.test(ACCESS_SECRET))) throw new Error('Production requires a strong JWT_SECRET (32+ characters)');
 const ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES ?? '15m';
 const REFRESH_EXPIRES = process.env.JWT_REFRESH_EXPIRES ?? '7d';
 
