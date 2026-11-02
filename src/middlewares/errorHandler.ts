@@ -1,3 +1,4 @@
+import { ZodError } from 'zod';
 import { Request, Response, NextFunction } from 'express';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../config/logger.js';
@@ -9,13 +10,19 @@ export const errorHandler = (
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _next: NextFunction
 ): void => {
-  logger.error(err.message, { stack: err.stack });
+  // Prisma/runtime errors may embed submitted text or credentials. Never log raw errors.
+  logger.error('Request failed', { errorType: err instanceof AppError ? 'application' : err instanceof ZodError ? 'validation' : 'unexpected' });
 
   if (err instanceof AppError) {
     res.status(err.statusCode).json({
       success: false,
       message: err.message,
     });
+    return;
+  }
+
+  if (err instanceof ZodError) {
+    res.status(400).json({ success: false, message: 'Validation failed', errors: err.issues.map(i => `${i.path.join('.')}: ${i.message}`) });
     return;
   }
 
@@ -34,6 +41,6 @@ export const errorHandler = (
   res.status(500).json({
     success: false,
     message:
-      process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message,
+      'Internal server error',
   });
 };

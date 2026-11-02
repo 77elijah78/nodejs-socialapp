@@ -33,10 +33,11 @@ if (process.env.NODE_ENV !== 'production') {
   globalThis.__prisma = prisma;
 
   prisma.$on('query', (e) => {
-    logger.debug(`Query: ${e.query} | Params: ${e.params} | ${e.duration}ms`);
+    // Never log bound values: they can include push tokens and auth secrets.
+    logger.debug(`Query: ${e.query} | ${e.duration}ms`);
   });
 }
 
 prisma.$on('error', (e) => {
-  logger.error('Prisma error', e);
+  logger.error(`Database operation failed (${e.target})`);
 });

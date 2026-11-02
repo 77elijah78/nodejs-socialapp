@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { Request } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import { uploadsRoot } from '../config/media.js';
 import { AppError } from '../utils/errors.js';
 
 // ─── Media type config ─────────────────────────────────────────────
@@ -14,7 +15,7 @@ export const MEDIA_TYPES = {
     folder: 'images',
   },
   video: {
-    mimes: ['video/mp4', 'video/quicktime', 'video/webm', 'video/x-msvideo'],
+    mimes: ['video/mp4', 'video/quicktime', 'video/webm'],
     extensions: ['.mp4', '.mov', '.webm', '.avi'],
     maxSize: 200 * 1024 * 1024,  // 200 MB
     folder: 'videos',
@@ -43,7 +44,7 @@ export const getCategoryFromMime = (mime: string): MediaCategory | null => {
 };
 
 // ─── Ensure upload directories exist ──────────────────────────────
-const UPLOADS_ROOT = process.env.UPLOADS_PATH ?? 'uploads';
+const UPLOADS_ROOT = uploadsRoot;
 
 export const ensureUploadDirs = (): void => {
   for (const { folder } of Object.values(MEDIA_TYPES)) {
@@ -63,7 +64,7 @@ const storage = multer.diskStorage({
   },
 
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
+    const ext = ({ 'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp', 'video/mp4': '.mp4', 'video/quicktime': '.mov', 'video/webm': '.webm', 'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/wav': '.wav', 'audio/webm': '.webm', 'audio/mp4': '.m4a', 'audio/aac': '.aac' } as Record<string,string>)[file.mimetype];
     const unique = `${uuidv4()}${ext}`;
     cb(null, unique);
   },
@@ -84,7 +85,7 @@ const fileFilter = (_req: Request, file: Express.Multer.File, cb: FileFilterCall
 export const uploadSingle = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 200 * 1024 * 1024, files: 1 },
+  limits: { fields: 10, fieldSize: 4096, parts: 16, fileSize: 200 * 1024 * 1024, files: 1 },
 }).single('file');
 
 // Multiple images — for post creation (up to 4)
@@ -97,7 +98,7 @@ export const uploadImages = multer({
       cb(new AppError('Only images are allowed here', 400));
     }
   },
-  limits: { fileSize: MEDIA_TYPES.image.maxSize, files: 4 },
+  limits: { fields: 10, fieldSize: 4096, parts: 16, fileSize: MEDIA_TYPES.image.maxSize, files: 4 },
 }).array('images', 4);
 
 // Avatar — single image only
@@ -110,7 +111,7 @@ export const uploadAvatar = multer({
       cb(new AppError('Only images are allowed for avatars', 400));
     }
   },
-  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  limits: { fields: 10, fieldSize: 4096, parts: 16, fileSize: 5 * 1024 * 1024, files: 1 },
 }).single('avatar');
 
 // ─── Multer error wrapper ──────────────────────────────────────────

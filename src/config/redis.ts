@@ -19,3 +19,10 @@ const createRedisClient = (name: string) => {
 export const pubClient  = createRedisClient('pub');
 export const subClient  = createRedisClient('sub');
 export const redisClient = createRedisClient('main');
+
+// Bounded fail-open presence/dedup operations must not block message delivery.
+export const deliveryRedis = new Redis(redisUrl, {
+  maxRetriesPerRequest: 1, enableOfflineQueue: false, commandTimeout: 1000,
+  connectTimeout: 2000, retryStrategy: times => Math.min(times * 100, 3000),
+});
+deliveryRedis.on('error', () => logger.warn('Delivery Redis unavailable; push suppression/dedup will fail open'));
