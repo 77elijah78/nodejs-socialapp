@@ -30,6 +30,7 @@ export const updateProfileSchema = z.object({
     username: z.string().min(3).max(30).regex(/^[a-zA-Z0-9_]+$/, 'Only letters, numbers, underscores').optional(),
     bio: z.string().max(300).optional(),
     avatarUrl: mediaUrl.optional(),
+    isPrivate: z.boolean().optional(),
   }),
 });
 

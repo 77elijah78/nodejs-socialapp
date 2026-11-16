@@ -127,6 +127,11 @@ model NotificationReplyAction {
 }
 
 model User {
+  isPrivate Boolean @default(false) @map("is_private")
+  commentLikes CommentLike[]
+  exploreSessions ExploreSession[]
+  exploreSeen ExploreSeen[]
+  postInterests PostInterest[]
   notificationReplyActions NotificationReplyAction[]
   pushDevices PushDevice[]
   messagePushEnabled Boolean @default(true) @map("message_push_enabled")
@@ -182,6 +187,7 @@ model User {
 
   @@index([avatarUrl])
   @@index([accountStatus])
+  @@index([accountStatus, isPrivate], map: "users_status_private_idx")
   @@index([createdAt])
   @@index([lastActiveAt])
   @@map("users")
@@ -236,6 +242,8 @@ model Follow {
 // POSTS
 // ─────────────────────────────────────────────────────────────
 model Post {
+  interests PostInterest[]
+  seen ExploreSeen[]
   mediaMetadata Json? @map("media_metadata")
   activities Notification[]
   id         String    @id @default(uuid())
@@ -273,10 +281,12 @@ model Like {
   @@id([userId, postId])
   @@index([postId])
   @@index([createdAt])
+  @@index([userId, createdAt(sort: Desc), postId], map: "likes_user_recent_idx")
   @@map("likes")
 }
 
 model Comment {
+  likes CommentLike[]
   parent Comment? @relation("CommentReplies", fields: [repliedToId], references: [id], onDelete: SetNull)
   replies Comment[] @relation("CommentReplies")
   notifications Notification[]
@@ -298,6 +308,7 @@ model Comment {
   @@index([authorId])
   @@index([createdAt])
   @@index([deletedAt])
+  @@index([authorId, createdAt(sort: Desc), id], map: "comments_author_recent_idx")
   @@map("comments")
 }
 
@@ -312,6 +323,7 @@ model SavedPost {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@id([userId, postId])
+  @@index([userId, createdAt(sort: Desc), postId(sort: Desc)], map: "saved_posts_user_cursor_idx")
   @@map("saved_posts")
 }
 
@@ -597,4 +609,54 @@ model PlatformSetting {
 
   @@index([category])
   @@map("platform_settings")
+}
+
+
+model CommentLike {
+  id String @id @default(uuid())
+  commentId String @map("comment_id")
+  userId String @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([commentId, userId])
+  @@index([userId, createdAt], map: "comment_likes_user_created_idx")
+  @@map("comment_likes")
+}
+
+model ExploreSession {
+  id String @id @default(uuid())
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postIds String[] @map("post_ids")
+  expiresAt DateTime @map("expires_at")
+  @@index([userId, expiresAt], map: "explore_sessions_user_expiry_idx")
+  @@index([expiresAt], map: "explore_sessions_expiry_idx")
+  @@map("explore_sessions")
+}
+
+model ExploreSeen {
+  sessionId String @map("session_id")
+  userId String @map("user_id")
+  postId String @map("post_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  seenAt DateTime @default(now()) @map("seen_at")
+  @@id([userId, postId])
+  @@index([userId, seenAt], map: "explore_seen_user_seen_idx")
+  @@index([seenAt], map: "explore_seen_seen_idx")
+  @@map("explore_seen")
+}
+
+// Recomputed from canonical interaction rows, never incremented from Kafka deltas.
+model PostInterest {
+  userId String @map("user_id")
+  postId String @map("post_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  weight Int
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@id([userId, postId])
+  @@index([userId, updatedAt], map: "post_interests_user_updated_idx")
+  @@map("post_interests")
 }

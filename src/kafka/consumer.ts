@@ -1,3 +1,4 @@
+import { processSocialInteraction } from '../services/social-interaction.service.js';
 import { emitMessageOnce } from '../services/delivery-state.service.js';
 import { activityService } from '../services/activity.service.js';
 import { messageInclude, serializeMessage } from '../services/message.dto.js';
@@ -68,6 +69,9 @@ export async function disconnectConsumer(): Promise<void> {
 
 export async function routeEvent(io: Server, topic: string, payload: unknown): Promise<void> {
   switch (topic) {
+    case TOPICS.SOCIAL_INTERACTIONS:
+      await processSocialInteraction(payload);
+      break;
     case TOPICS.CHAT_MESSAGES:
       await handleChatMessage(io, payload as ChatMessageEvent);
       break;

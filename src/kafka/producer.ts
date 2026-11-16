@@ -1,3 +1,4 @@
+import type { SocialEvent } from '../services/social-interaction.service.js';
 import { Producer, CompressionTypes } from 'kafkajs';
 import { kafka, TopicName } from '../config/kafka.js';
 import { logger } from '../config/logger.js';
@@ -136,6 +137,7 @@ export interface ConversationDeletedEvent {
 }
 
 export const kafkaEvents = {
+  socialInteraction: (event: SocialEvent) => publishEvent(TOPICS.SOCIAL_INTERACTIONS, event, event.postId),
   chatMessage: (event: ChatMessageEvent) =>
     publishEvent(TOPICS.CHAT_MESSAGES, event, event.conversationId),
 

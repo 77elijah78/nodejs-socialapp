@@ -1,6 +1,6 @@
 import { createActivity, publishActivity, withdrawActivity } from './activity.service.js';
 import { prisma } from '../config/database.js';
-import { NotFoundError, ConflictError } from '../utils/errors.js';
+import { NotFoundError, ConflictError, ForbiddenError } from '../utils/errors.js';
 
 export const userService = {
   async getProfile(username: string, requesterId?: string) {
@@ -13,6 +13,7 @@ export const userService = {
         bio: true,
         avatarUrl: true,
         isVerified: true,
+        isPrivate: true,
         createdAt: true,
         _count: { select: { followers: true, following: true, posts: true } },
       },
@@ -70,7 +71,7 @@ export const userService = {
 
   async updateProfile(
     userId: string,
-    data: { displayName?: string; username?: string; bio?: string; avatarUrl?: string }
+    data: { displayName?: string; username?: string; bio?: string; avatarUrl?: string; isPrivate?: boolean }
   ) {
     if (data.username) {
       const existing = await prisma.user.findUnique({
@@ -82,17 +83,18 @@ export const userService = {
       }
     }
 
-    return prisma.user.update({
-      where: { id: userId },
-      data,
-      select: { id: true, username: true, displayName: true, bio: true, avatarUrl: true },
+    const updated = await prisma.user.update({
+      where: { id: userId }, data,
+      select: { id: true, username: true, displayName: true, bio: true, avatarUrl: true, isPrivate: true },
     });
+    return updated;
   },
 
   async follow(followerId: string, targetUsername: string) {
     const target = await prisma.user.findUnique({ where: { username: targetUsername } });
     if (!target) throw new NotFoundError('User');
     if (target.id === followerId) throw new ConflictError('Cannot follow yourself');
+    if (target.isPrivate) throw new ForbiddenError('Private accounts do not accept follows until follow requests are supported');
 
     await prisma.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM users WHERE id=${target.id} FOR UPDATE`;

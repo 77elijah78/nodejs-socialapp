@@ -4,6 +4,7 @@ import { prisma } from '../config/database.js';
 import { publishReceipts } from './receipt-outbox.service.js';
 import { logger } from '../config/logger.js';
 import { NotFoundError, ValidationError } from '../utils/errors.js';
+import { commentSelect, enrichComments, enrichPosts, postSelect, visiblePosts } from './post.dto.js';
 
 const visible = { dismissedAt: null, withdrawnAt: null };
 const postTypes = ['LIKE', 'COMMENT', 'SHARE'];
@@ -59,21 +60,21 @@ export async function withdrawActivity(tx: Prisma.TransactionClient, where: Pris
   }
 }
 export async function publishActivity() {
-  await publishReceipts().catch(error => logger.error('Activity outbox will retry', error));
+  await publishReceipts().catch(() => logger.error('Activity outbox will retry'));
 }
 
 // Constant query count per page; whitelist fields, including safe legacy references.
 async function hydrate(items: Notification[]) {
   if (!items.length) return [];
+  const requesterId = items[0]!.userId;
   const postId = (n: Notification) => n.postId ?? (postTypes.includes(n.type) ? n.resourceId : null);
-  const [actors, posts, comments] = await Promise.all([
+  const [actors, rawPosts, rawComments] = await Promise.all([
     prisma.user.findMany({ where: { id: { in: items.flatMap(i => i.actorId ? [i.actorId] : []) }, deletedAt: null, accountStatus: 'ACTIVE' },
       select: { id: true, username: true, displayName: true, avatarUrl: true } }),
-    prisma.post.findMany({ where: { id: { in: items.flatMap(i => postId(i) ? [postId(i)!] : []) }, deletedAt: null },
-      select: { id: true, content: true, imageUrls: true, videoUrl: true, mediaMetadata: true } }),
-    prisma.comment.findMany({ where: { id: { in: items.flatMap(i => i.commentId ? [i.commentId] : []) }, deletedAt: null, post: { deletedAt: null } },
-      select: { id: true, postId: true, content: true } }),
+    prisma.post.findMany({ where: { id: { in: items.flatMap(i => postId(i) ? [postId(i)!] : []) }, ...visiblePosts(requesterId) }, select: postSelect }),
+    prisma.comment.findMany({ where: { id: { in: items.flatMap(i => i.commentId ? [i.commentId] : []) }, deletedAt: null, post: visiblePosts(requesterId) }, select: commentSelect }),
   ]);
+  const [posts, comments] = await Promise.all([enrichPosts(rawPosts, requesterId), enrichComments(rawComments, requesterId)]);
   const actorMap = new Map(actors.map(a => [a.id, a]));
   const postMap = new Map(posts.map(p => [p.id, p]));
   const commentMap = new Map(comments.map(c => [c.id, c]));

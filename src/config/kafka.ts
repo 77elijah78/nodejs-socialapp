@@ -23,6 +23,7 @@ export const kafka = new Kafka({
 
 // ─── Topic constants ─────────────────────────────────────────────
 export const TOPICS = {
+  SOCIAL_INTERACTIONS: 'social.interactions',
   CHAT_MESSAGES:        'chat.messages',
   CHAT_DELIVERED:       'chat.delivered',
   CHAT_EDITED:          'chat.edited',

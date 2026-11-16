@@ -31,7 +31,9 @@ for (const dir of readdirSync('prisma/migrations').filter(d => !d.endsWith('.tom
   await db.exec(readFileSync(`prisma/migrations/${dir}/migration.sql`, 'utf8'));
 }
 // Adapt only the driver transport: actual Prisma queries/transactions run in PostgreSQL WASM.
+let driverQueries=0;
 const query = async (q, values) => {
+  driverQueries++;
   const sql = typeof q === 'string' ? q : q.text;
   const r = await db.query(sql, values ?? q.values ?? [], { parsers: {
     1114: v => v, 1184: v => v, 1082: v => v, 114: v => v, 3802: v => v,
@@ -44,7 +46,7 @@ pool.connect = async () => Object.assign(new EventEmitter(), { query, release() 
 const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
 const events = [];
 let kafkaFails = false;
-const kafkaEvents = Object.fromEntries(['messageRead','messageDelivered','chatMessage','notification','notificationUpdated','notificationState','messageDeleted','messageDeletedForMe','conversationDeleted'].map(name => [name, async payload => {
+const kafkaEvents = Object.fromEntries(['socialInteraction','messageRead','messageDelivered','chatMessage','notification','notificationUpdated','notificationState','messageDeleted','messageDeletedForMe','conversationDeleted'].map(name => [name, async payload => {
   if (kafkaFails) throw Error('Kafka unavailable');
   events.push({ name, payload });
 }]));
@@ -56,7 +58,7 @@ const deliveryRedis = {
   async eval(script,n,key,value) { if(deliveryRedisFails) throw Error('Redis unavailable'); if(await this.get(key)===value) return deliveryValues.delete(key)?1:0; return 0; },
 };
 globalThis.__receiptTest = { prisma, kafkaEvents, deliveryRedis };
-await build({ entryPoints: ['src/services/push-device.service.ts', 'src/services/push-delivery.service.ts', 'src/services/expo-push.provider.ts', 'src/services/delivery-state.service.ts', 'src/routes/push.routes.ts', 'src/socket/push.handler.ts', 'src/config/push.ts', 'src/socket/authenticate.ts', 'src/config/media.ts', 'src/services/post.service.ts', 'src/services/user.service.ts', 'src/services/activity.service.ts', 'src/services/media.service.ts', 'src/routes/media.routes.ts', 'src/routes/post.routes.ts', 'src/routes/activity.routes.ts', 'src/middlewares/media-access.ts', 'src/middlewares/upload.ts', 'src/services/message.service.ts', 'src/services/receipt-outbox.service.ts', 'src/socket/chat.handler.ts', 'src/kafka/consumer.ts', 'src/routes/message.routes.ts'],
+await build({ entryPoints: ['src/services/explore.service.ts', 'src/services/social-interaction.service.ts', 'src/services/push-device.service.ts', 'src/services/push-delivery.service.ts', 'src/services/expo-push.provider.ts', 'src/services/delivery-state.service.ts', 'src/routes/push.routes.ts', 'src/socket/push.handler.ts', 'src/config/push.ts', 'src/socket/authenticate.ts', 'src/config/media.ts', 'src/services/post.service.ts', 'src/services/user.service.ts', 'src/services/activity.service.ts', 'src/services/media.service.ts', 'src/routes/media.routes.ts', 'src/routes/post.routes.ts', 'src/routes/activity.routes.ts', 'src/routes/user.routes.ts', 'src/middlewares/media-access.ts', 'src/middlewares/upload.ts', 'src/services/message.service.ts', 'src/services/receipt-outbox.service.ts', 'src/socket/chat.handler.ts', 'src/kafka/consumer.ts', 'src/routes/message.routes.ts'],
   bundle: true, platform: 'node', format: 'esm', outdir: '.cache/bundles', packages: 'external',
   plugins: [{ name: 'boundaries', setup(b) {
     b.onResolve({ filter: /config\/redis\.js$/ }, () => ({ path: 'redis', namespace: 'test' }));
@@ -1153,3 +1155,224 @@ test('notification reply: actual HTTP timeout after commit safely retries the sa
     assert.equal(await prisma.message.count({where:{conversationId:f.c.id,senderId:reader}}),1);
   }finally{http.closeAllConnections();await new Promise(resolve=>http.close(resolve));}
 }));
+
+const {exploreService,exploreScore,topics}=await import('../.cache/bundles/services/explore.service.js');
+const {processSocialInteraction}=await import('../.cache/bundles/services/social-interaction.service.js');
+
+test('comment likes: idempotent transitions, unique constraint, reply counts and deletion authorization',async()=>{
+  const post=await postService.createPost(sender,{content:'comment engagement'});
+  const comment=await postService.addComment(post.id,reader,'root');await postService.addComment(post.id,third,'reply',comment.id);
+  assert.equal((await postService.setCommentLike(post.id,comment.id,reader,true)).likesCount,1);
+  assert.equal((await postService.setCommentLike(post.id,comment.id,reader,true)).likesCount,1);
+  assert.equal((await postService.setCommentLike(post.id,comment.id,third,true)).likesCount,2);
+  await assert.rejects(prisma.commentLike.create({data:{commentId:comment.id,userId:reader}}),e=>e.code==='P2002');
+  const info=await postService.commentEngagement(post.id,comment.id,reader);assert.equal(info.likesCount,2);assert.equal(info.repliesCount,1);assert.equal(info.isLikedByCurrentUser,true);
+  assert.equal((await postService.getComments(post.id,stranger,1,20)).comments.find(c=>c.id===comment.id).isLikedByCurrentUser,false);
+  assert.equal((await postService.setCommentLike(post.id,comment.id,reader,false)).likesCount,1);
+  assert.equal((await postService.setCommentLike(post.id,comment.id,reader,false)).likesCount,1);
+  const foreign=await postService.createPost(third,{content:'other'});
+  await assert.rejects(postService.setCommentLike(foreign.id,comment.id,reader,true),e=>e.statusCode===404);
+  await postService.deleteComment(post.id,comment.id,reader);
+  await assert.rejects(postService.setCommentLike(post.id,comment.id,stranger,true),e=>e.statusCode===404);
+  await assert.rejects(postService.commentEngagement(post.id,comment.id,reader),e=>e.statusCode===404);
+  assert.equal((await postService.getPost(post.id,reader)).commentsCount,1);
+});
+
+test('post engagement: canonical fields and legacy aliases consistent across detail/feed/profile/liked/saved',async()=>{
+  const post=await postService.createPost(sender,{content:'engagement fields'});
+  await postService.likePost(post.id,reader);await postService.savePost(post.id,reader);await postService.savePost(post.id,reader);
+  await postService.addComment(post.id,third,'counted');
+  const read=await postService.getPost(post.id,reader);
+  for(const p of [read,(await postService.getUserPosts(sender,reader,1,100)).posts.find(p=>p.id===post.id)].filter(Boolean)) {
+    assert.equal(p.likesCount,1);assert.equal(p.commentsCount,1);assert.equal(p.isLikedByCurrentUser,true);assert.equal(p.isBookmarkedByCurrentUser,true);assert.equal(p.isLiked,true);assert.equal(p.isSaved,true);
+  }
+  // getUserPosts takes username, not UUID; test the actual account username explicitly.
+  const account=await prisma.user.findUnique({where:{id:sender}});
+  const profile=(await postService.getUserPosts(account.username,reader,1,100)).posts.find(p=>p.id===post.id);assert.equal(profile.isSaved,true);
+  const saved=(await postService.getSavedPosts(reader,1,100)).posts.find(p=>p.id===post.id);assert.equal(saved.id,post.id);assert.equal(saved.likesCount,1);assert.ok(saved.author);assert.ok('mediaMetadata' in saved);assert.ok(!('commentId' in saved));
+  const liked=(await postService.getLikedPosts(reader,1,100)).posts.find(p=>p.id===post.id);assert.equal(liked.isBookmarkedByCurrentUser,true);
+  assert.equal((await postService.getPost(post.id)).isLikedByCurrentUser,false);
+  await postService.unlikePost(post.id,reader);await postService.unsavePost(post.id,reader);await postService.unsavePost(post.id,reader);
+  const after=await postService.getPost(post.id,reader);assert.equal(after.likesCount,0);assert.equal(after.isSaved,false);
+});
+
+test('comments and bookmarks: timestamp/id cursors, stable navigation and unavailable filtering',async()=>{
+  const user=randomUUID();await prisma.user.create({data:{id:user,username:user,email:`${user}@test.dev`,passwordHash:'unused'}});
+  const posts=[];for(let i=0;i<3;i++){const p=await postService.createPost(sender,{content:`saved ${i}`});posts.push(p);await postService.savePost(p.id,user);}
+  const tied=new Date('2026-01-01');await prisma.savedPost.updateMany({where:{userId:user},data:{createdAt:tied}});
+  const first=await postService.getSavedPosts(user,1,1);const second=await postService.getSavedPosts(user,1,1,first.nextCursor);assert.notEqual(first.posts[0].id,second.posts[0].id);assert.ok(first.nextCursor);
+  const comments=[];for(let i=0;i<3;i++)comments.push(await postService.addComment(posts[0].id,reader,`comment ${i}`));
+  await prisma.comment.updateMany({where:{postId:posts[0].id},data:{createdAt:tied}});
+  const a=await postService.getComments(posts[0].id,reader,1,1),b=await postService.getComments(posts[0].id,reader,1,1,a.nextCursor);assert.notEqual(a.comments[0].id,b.comments[0].id);
+  await postService.deletePost(posts[1].id,sender);
+  const saved=await postService.getSavedPosts(user,1,50);assert.equal(saved.total,2);assert.ok(saved.posts.every(p=>p.id!==posts[1].id));
+  await assert.rejects(postService.getSavedPosts(user,1,10,'bad'),e=>e.statusCode===400);
+});
+
+test('post visibility: private owner-only, suspended/deleted authors and media access filter',async()=>{
+  const owner=randomUUID();await prisma.user.create({data:{id:owner,username:owner,email:`${owner}@test.dev`,passwordHash:'unused'}});
+  const p=await postService.createPost(owner,{content:'private account post'});await postService.savePost(p.id,reader);
+  await prisma.user.update({where:{id:owner},data:{isPrivate:true}});
+  assert.equal((await postService.getPost(p.id,owner)).id,p.id);
+  for(const read of [()=>postService.getPost(p.id,reader),()=>postService.getComments(p.id,reader,1,10),()=>postService.likePost(p.id,reader),()=>postService.savePost(p.id,reader)])await assert.rejects(read(),e=>e.statusCode===404);
+  assert.ok(!(await postService.getSavedPosts(reader,1,100)).posts.some(post=>post.id===p.id));
+  await prisma.user.update({where:{id:owner},data:{isPrivate:false,accountStatus:'SUSPENDED'}});await assert.rejects(postService.getPost(p.id),e=>e.statusCode===404);
+  await prisma.user.update({where:{id:owner},data:{accountStatus:'ACTIVE',deletedAt:new Date()}});await assert.rejects(postService.getPost(p.id),e=>e.statusCode===404);
+});
+
+test('social outbox: Kafka outage cannot fail committed engagement; retries and duplicate/reordered signals converge',async()=>{
+  const post=await postService.createPost(sender,{content:'#photography durable signal'});const comment=await postService.addComment(post.id,reader,'one');
+  events.length=0;kafkaFails=true;
+  try{await postService.setCommentLike(post.id,comment.id,reader,true);await postService.savePost(post.id,reader);}
+  finally{kafkaFails=false;}
+  assert.equal((await postService.commentEngagement(post.id,comment.id,reader)).likesCount,1);
+  const pending=(await prisma.receiptOutbox.findMany()).filter(r=>r.payload.kind==='socialInteraction'&&r.payload.event.postId===post.id);assert.ok(pending.length>=2);
+  await prisma.receiptOutbox.updateMany({where:{id:{in:pending.map(p=>p.id)}},data:{availableAt:new Date(0)}});await publishReceipts();
+  const emitted=events.filter(e=>e.name==='socialInteraction'&&e.payload.postId===post.id);assert.ok(emitted.length>=2);
+  await processSocialInteraction(emitted[0].payload);
+  const beforeReplay=await prisma.postInterest.findUnique({where:{userId_postId:{userId:reader,postId:post.id}}});
+  await processSocialInteraction(emitted[0].payload);
+  assert.equal((await prisma.postInterest.findUnique({where:{userId_postId:{userId:reader,postId:post.id}}})).updatedAt.getTime(),beforeReplay.updatedAt.getTime());
+  assert.equal((await prisma.postInterest.findUnique({where:{userId_postId:{userId:reader,postId:post.id}}})).weight,8);
+  await postService.unsavePost(post.id,reader);await postService.setCommentLike(post.id,comment.id,reader,false);
+  for(const e of emitted.reverse())await processSocialInteraction(e.payload);
+  assert.equal((await prisma.postInterest.findUnique({where:{userId_postId:{userId:reader,postId:post.id}}})).weight,2);
+  await assert.rejects(processSocialInteraction({type:'bad'}));
+});
+
+async function exploreFixture() {
+  const viewer=randomUUID();await prisma.user.create({data:{id:viewer,username:viewer,email:`${viewer}@test.dev`,passwordHash:'unused'}});
+  const old=await prisma.post.findMany({distinct:['authorId'],select:{authorId:true}});
+  if(old.length)await prisma.follow.createMany({data:old.map(p=>({followerId:viewer,followingId:p.authorId})),skipDuplicates:true});
+  const authors=[];for(let i=0;i<8;i++){const id=randomUUID();authors.push(id);await prisma.user.create({data:{id,username:id,email:`${id}@test.dev`,passwordHash:'unused'}});}
+  const posts=[];for(let i=0;i<8;i++)posts.push(await prisma.post.create({data:{authorId:authors[i],content:`#topic${i} discovery`,imageUrls:[]}}));
+  return {viewer,authors,posts};
+}
+
+test('Explore scoring: popularity, comments, recency, bounded engagement rate and hashtag affinity',()=>{
+  assert.ok(exploreScore(10,5,100,1,0)>exploreScore(0,0,100,1,0));
+  assert.ok(exploreScore(1,1,100,1,0)>exploreScore(1,1,100,100,0));
+  assert.ok(exploreScore(1,1,100,1,5)>exploreScore(1,1,100,1,0));
+  assert.ok(exploreScore(10,1,10,1,0)>exploreScore(10,1,10000,1,0));
+  assert.deepEqual(topics('Hello #Tokyo #TOKYO #写真 #music'),['#tokyo','#写真','#music']);
+});
+
+test('Explore snapshot: rank order, unique pages, retry cursor, refresh excludes served and account-bound expiry',async()=>{
+  const f=await exploreFixture();
+  for(const userId of ids)await prisma.like.create({data:{userId,postId:f.posts[7].id}});
+  const first=await exploreService.get(f.viewer,2);assert.equal(first.posts[0].id,f.posts[7].id);assert.equal(first.posts.length,2);assert.ok(first.nextCursor);
+  const next=await exploreService.get(f.viewer,2,first.nextCursor);const retry=await exploreService.get(f.viewer,2,first.nextCursor);assert.deepEqual(next.posts.map(p=>p.id),retry.posts.map(p=>p.id));
+  assert.ok(next.posts.every(p=>!first.posts.some(a=>a.id===p.id)));
+  const refresh=await exploreService.get(f.viewer,2,undefined,true);assert.ok(refresh.posts.every(p=>![...first.posts,...next.posts].some(a=>a.id===p.id)));
+  await assert.rejects(exploreService.get(reader,2,first.nextCursor),e=>e.statusCode===400);
+  await assert.rejects(exploreService.get(f.viewer,2,first.nextCursor,true),e=>e.statusCode===400);
+  const parsed=JSON.parse(Buffer.from(first.nextCursor,'base64url').toString());await prisma.exploreSession.update({where:{id:parsed.sessionId},data:{expiresAt:new Date(0)}});
+  await assert.rejects(exploreService.get(f.viewer,2,first.nextCursor),e=>e.statusCode===400);
+});
+
+test('Explore: affinity fallback during Kafka outage, author diversity and post/follow/privacy revalidation',async()=>{
+  const f=await exploreFixture();await prisma.like.create({data:{userId:f.viewer,postId:f.posts[0].id}});
+  const target=await prisma.post.create({data:{authorId:f.authors[1],content:'#topic0 related',imageUrls:[]}});
+  const first=await exploreService.get(f.viewer,1);assert.ok([target.id,f.posts[0].id].includes(first.posts[0].id));
+  const parsed=JSON.parse(Buffer.from(first.nextCursor,'base64url').toString());const session=await prisma.exploreSession.findUnique({where:{id:parsed.sessionId}});
+  const hiddenId=session.postIds[1];const hidden=await prisma.post.findUnique({where:{id:hiddenId}});await prisma.user.update({where:{id:hidden.authorId},data:{isPrivate:true}});
+  const last=await exploreService.get(f.viewer,50,first.nextCursor);assert.ok(last.posts.every(p=>p.author.id!==hidden.authorId));
+  const g=await exploreFixture();for(let i=0;i<12;i++)await prisma.post.create({data:{authorId:g.authors[0],content:'#dominant',imageUrls:[]}});
+  const diverse=await exploreService.get(g.viewer,10);const counts=new Map();for(const p of diverse.posts)counts.set(p.author.id,(counts.get(p.author.id)??0)+1);
+  assert.ok([...counts.values()].every(n=>n<=2));assert.ok(counts.size>1);
+  const h=await exploreFixture();const page=await exploreService.get(h.viewer,1);
+  const decoded=JSON.parse(Buffer.from(page.nextCursor,'base64url').toString());const snapshot=await prisma.exploreSession.findUnique({where:{id:decoded.sessionId}});
+  const blocked=await prisma.post.findUnique({where:{id:snapshot.postIds[1]}});await prisma.follow.create({data:{followerId:h.viewer,followingId:blocked.authorId}});
+  await prisma.post.update({where:{id:snapshot.postIds[2]},data:{deletedAt:new Date()}});
+  const rest=await exploreService.get(h.viewer,50,page.nextCursor);assert.ok(rest.posts.every(p=>p.id!==blocked.id&&p.id!==snapshot.postIds[2]));
+});
+
+test('social API HTTP: authentication, validation, comment engagement and Explore/bookmark envelopes',async()=>{
+  const {default:postRouter}=await import('../.cache/bundles/routes/post.routes.js');const {ZodError}=await import('zod');
+  const app=express();app.use(express.json());app.use('/posts',postRouter);app.use((err,req,res,next)=>res.status(err.statusCode??(err instanceof ZodError?400:500)).json({success:false,message:'Rejected'}));
+  const http=app.listen(0,'127.0.0.1');await new Promise(resolve=>http.on('listening',resolve));
+  const base=`http://127.0.0.1:${http.address().port}/posts`;const headers={Authorization:`Bearer ${jwt.sign({userId:reader,username:reader},process.env.JWT_SECRET)}`,'Content-Type':'application/json'};
+  try{
+    assert.equal((await fetch(`${base}/explore`)).status,401);assert.equal((await fetch(`${base}/explore?limit=999`,{headers})).status,400);
+    const p=await postService.createPost(sender,{content:'HTTP post'});const c=await postService.addComment(p.id,reader,'HTTP comment');
+    const response=await fetch(`${base}/${p.id}/comments/${c.id}/like`,{method:'POST',headers});assert.equal(response.status,200);assert.equal((await response.json()).data.likesCount,1);
+    const commentInfo=await(await fetch(`${base}/${p.id}/comments/${c.id}/likes`,{headers})).json();assert.equal(commentInfo.data.isLikedByCurrentUser,true);
+    const postInfo=await(await fetch(`${base}/${p.id}/engagement`,{headers})).json();assert.equal(postInfo.data.commentsCount,1);assert.equal(postInfo.data.isLikedByCurrentUser,false);
+    assert.equal((await fetch(`${base}/${p.id}/comments/bad/like`,{method:'POST',headers})).status,400);
+    await fetch(`${base}/${p.id}/save`,{method:'POST',headers});const saved=await(await fetch(`${base}/saved`,{headers})).json();assert.ok(saved.data.some(post=>post.id===p.id&&post.isBookmarkedByCurrentUser));
+    const detail=await(await fetch(`${base}/${p.id}`,{headers})).json();assert.equal(detail.data.isSaved,true);
+    const explore=await(await fetch(`${base}/explore?limit=2`,{headers})).json();assert.equal(explore.success,true);assert.equal(explore.meta.algorithmVersion,1);
+    assert.equal((await fetch(`${base}/saved?cursor=invalid`,{headers})).status,400);
+  }finally{await new Promise(resolve=>http.close(resolve));}
+});
+
+test('private post media authorization follows post visibility and prevents public caching',async()=>{
+  const owner=randomUUID();await prisma.user.create({data:{id:owner,username:owner,email:`${owner}@test.dev`,passwordHash:'unused',isPrivate:true}});
+  const key=`images/${randomUUID()}.jpg`,url=`https://media.example.com/uploads/${key}`;
+  await prisma.mediaAsset.create({data:{ownerId:owner,key,url,mimeType:'image/jpeg',size:10}});
+  await postService.createPost(owner,{content:'private media',imageUrls:[url]});
+  const check=async userId=>{const headers={};let failure;await authorizeMedia({path:`/${key}`,user:userId?{userId}:undefined},{type(){},set(k,v){headers[k]=v;}},error=>{failure=error;});return {failure,headers};};
+  assert.equal((await check()).failure.statusCode,403);assert.equal((await check(reader)).failure.statusCode,403);
+  const own=await check(owner);assert.equal(own.failure,undefined);assert.equal(own.headers['Cache-Control'],'private, no-store');
+  await prisma.user.update({where:{id:owner},data:{isPrivate:false}});assert.equal((await check()).failure,undefined);
+});
+
+test('Explore/comment-like migration preserves old post, comment, like and bookmark rows',async()=>{
+  const old=new PGlite();
+  try{
+    for(const dir of readdirSync('prisma/migrations').filter(d=>!d.endsWith('.toml')&&d!=='20261103000000_explore_comment_engagement').sort())await old.exec(readFileSync(`prisma/migrations/${dir}/migration.sql`,'utf8'));
+    await old.exec(`INSERT INTO users(id,username,email,password_hash,updated_at) VALUES ('legacy','legacy','legacy@social.test','test',now());
+      INSERT INTO posts(id,author_id,content,image_urls,updated_at) VALUES ('post','legacy','existing',ARRAY[]::text[],now());
+      INSERT INTO comments(id,author_id,post_id,content) VALUES ('comment','legacy','post','existing comment');
+      INSERT INTO likes(user_id,post_id) VALUES ('legacy','post'); INSERT INTO saved_posts(user_id,post_id) VALUES ('legacy','post');`);
+    await old.exec(readFileSync('prisma/migrations/20261103000000_explore_comment_engagement/migration.sql','utf8'));
+    for(const table of ['posts','comments','likes','saved_posts'])assert.equal((await old.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n,1);
+    assert.equal((await old.query('SELECT is_private FROM users')).rows[0].is_private,false);
+    assert.equal((await old.query('SELECT count(*)::int AS n FROM comment_likes')).rows[0].n,0);
+  }finally{await old.close();}
+});
+
+test('engagement batching: SQL call count does not grow per returned bookmark/comment',async()=>{
+  const user=randomUUID();await prisma.user.create({data:{id:user,username:user,email:`${user}@test.dev`,passwordHash:'unused'}});
+  const posts=[];for(let i=0;i<12;i++)posts.push(await prisma.post.create({data:{authorId:sender,content:`batch ${i}`,imageUrls:[]}}));
+  await prisma.savedPost.createMany({data:posts.map(p=>({userId:user,postId:p.id}))});
+  for(let i=0;i<12;i++)await prisma.comment.create({data:{authorId:reader,postId:posts[0].id,content:`batch comment ${i}`}});
+  async function calls(fn){const before=driverQueries;await fn();return driverQueries-before;}
+  const savedSmall=await calls(()=>postService.getSavedPosts(user,1,1));const savedLarge=await calls(()=>postService.getSavedPosts(user,1,20));
+  const commentsSmall=await calls(()=>postService.getComments(posts[0].id,user,1,1));const commentsLarge=await calls(()=>postService.getComments(posts[0].id,user,1,20));
+  assert.ok(savedLarge<=savedSmall+1);assert.ok(commentsLarge<=commentsSmall+1);
+  writeFileSync('.cache/social-query-counts.json',JSON.stringify({savedSmall,savedLarge,commentsSmall,commentsLarge},null,2));
+});
+
+test('private profile setting and activity hydration obey post visibility and engagement contract',async()=>{
+  const {userService}=await import('../.cache/bundles/services/user.service.js');
+  const {default:userRouter}=await import('../.cache/bundles/routes/user.routes.js');
+  const owner=randomUUID();await prisma.user.create({data:{id:owner,username:owner,email:`${owner}@test.dev`,passwordHash:'unused'}});
+  const post=await postService.createPost(owner,{content:'#private activity'});const parent=await postService.addComment(post.id,reader,'parent');await postService.addComment(post.id,third,'reply',parent.id);
+  const before=(await activityService.list(reader,1,20)).items.find(n=>n.comment?.repliedToId===parent.id);assert.equal(before.post.likesCount,0);assert.equal(before.comment.repliesCount,0);
+  await userService.updateProfile(owner,{isPrivate:true});
+  const privateActivity=(await activityService.list(reader,1,20)).items.find(n=>n.commentId!==null&&n.commentId!==parent.id);assert.equal(privateActivity.post,null);assert.equal(privateActivity.comment,null);
+  const profile=await userService.getProfile(owner,reader);assert.equal(profile.isPrivate,true);
+  await assert.rejects(userService.follow(reader,owner),e=>e.statusCode===403);
+  const storyUrl=`https://media.example.com/uploads/images/${randomUUID()}.jpg`;
+  await postService.createStory(owner,{mediaUrl:storyUrl,mediaType:'IMAGE'});
+  const story=(await prisma.story.findFirst({where:{userId:owner,mediaUrl:storyUrl}}));assert.ok(story);
+  assert.ok(!(await postService.getStories(reader)).some(item=>item.id===story.id));
+  assert.ok((await postService.getStories(owner)).some(item=>item.id===story.id));
+  await assert.rejects(postService.markStoryViewed(reader,story.id),e=>e.statusCode===404);
+  await postService.markStoryViewed(owner,story.id);
+  await assert.rejects(postService.shareStory(story.id,reader,randomUUID()),e=>e.statusCode===404);
+  const mediaKey=new URL(storyUrl).pathname.split('/uploads/')[1];
+  await prisma.mediaAsset.create({data:{ownerId:owner,key:mediaKey,url:storyUrl,mimeType:'image/jpeg',size:10}});
+  const mediaCheck=async userId=>{let failure;await authorizeMedia({path:`/${mediaKey}`,user:userId?{userId}:undefined},{type(){},set(){}},error=>{failure=error;});return failure;};
+  assert.equal((await mediaCheck(reader)).statusCode,403);assert.equal(await mediaCheck(owner),undefined);
+  await assert.rejects(postService.getPost(post.id,reader),e=>e.statusCode===404);
+  assert.equal((await postService.getPost(post.id,owner)).id,post.id);
+  const app=express();app.use(express.json());app.use('/users',userRouter);app.use((err,req,res,next)=>res.status(err.statusCode??400).json({success:false}));
+  const http=app.listen(0,'127.0.0.1');await new Promise(resolve=>http.on('listening',resolve));
+  try{
+    const auth={Authorization:`Bearer ${jwt.sign({userId:owner,username:owner},process.env.JWT_SECRET)}`,'Content-Type':'application/json'};
+    const response=await fetch(`http://127.0.0.1:${http.address().port}/users/me`,{method:'PATCH',headers:auth,body:JSON.stringify({isPrivate:false})});assert.equal(response.status,200);assert.equal((await response.json()).data.isPrivate,false);
+    const invalid=await fetch(`http://127.0.0.1:${http.address().port}/users/me`,{method:'PATCH',headers:auth,body:JSON.stringify({isPrivate:'false'})});assert.equal(invalid.status,400);
+  }finally{await new Promise(resolve=>http.close(resolve));}
+});
