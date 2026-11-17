@@ -46,19 +46,53 @@ pool.connect = async () => Object.assign(new EventEmitter(), { query, release() 
 const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
 const events = [];
 let kafkaFails = false;
-const kafkaEvents = Object.fromEntries(['socialInteraction','messageRead','messageDelivered','chatMessage','notification','notificationUpdated','notificationState','messageDeleted','messageDeletedForMe','conversationDeleted'].map(name => [name, async payload => {
+const kafkaEvents = Object.fromEntries(['socialInteraction','messageRead','messageDelivered','chatMessage','notification','notificationUpdated','notificationState','messageDeleted','messageDeletedForMe','conversationDeleted','messageEdited','conversationMembership','stickerPackChanged'].map(name => [name, async payload => {
   if (kafkaFails) throw Error('Kafka unavailable');
   events.push({ name, payload });
 }]));
 const deliveryValues = new Map();
 let deliveryRedisFails = false;
+function liveRedisValue(key) {
+  const value=deliveryValues.get(key);
+  if(value && value.expires>Date.now())return value;
+  deliveryValues.delete(key);return null;
+}
+function storeRedisValue(key,value,ttlMs) { deliveryValues.set(key,{value,expires:Date.now()+ttlMs}); }
 const deliveryRedis = {
-  async get(key) { if(deliveryRedisFails) throw Error('Redis unavailable'); const v=deliveryValues.get(key); if(v && v.expires>Date.now()) return v.value; deliveryValues.delete(key); return null; },
-  async set(key,value,ex,ttl,nx) { if(nx==='NX' && deliveryValues.get(key)?.expires>Date.now()) return null; if(deliveryRedisFails) throw Error('Redis unavailable'); deliveryValues.set(key,{value,expires:Date.now()+ttl*1000}); return 'OK'; },
-  async eval(script,n,key,value) { if(deliveryRedisFails) throw Error('Redis unavailable'); if(await this.get(key)===value) return deliveryValues.delete(key)?1:0; return 0; },
+  async get(key) { if(deliveryRedisFails) throw Error('Redis unavailable'); return liveRedisValue(key)?.value ?? null; },
+  async set(key,value,ex,ttl,nx) {
+    if(deliveryRedisFails) throw Error('Redis unavailable');
+    if(nx==='NX' && liveRedisValue(key)) return null;
+    storeRedisValue(key,value,ex==='PX'?Number(ttl):Number(ttl)*1000);return 'OK';
+  },
+  async eval(script,n,...args) {
+    if(deliveryRedisFails) throw Error('Redis unavailable');
+    if(n===4 && script.includes('ip_cooldown')) {
+      const [ipKey,userKey,ipCooldownKey,userCooldownKey,ipMax,userMax,windowMs,cooldownMs]=args;
+      const ttl=key=>{const value=liveRedisValue(key);return value?Math.max(1,value.expires-Date.now()):-2;};
+      const ipCooldown=ttl(ipCooldownKey),userCooldown=ttl(userCooldownKey);
+      if(ipCooldown>0||userCooldown>0)return [1,Math.max(ipCooldown,userCooldown),0,0];
+      const increment=(key)=>{const value=liveRedisValue(key);const count=Number(value?.value??0)+1;storeRedisValue(key,String(count),value?value.expires-Date.now():Number(windowMs));return count;};
+      const ipCount=increment(ipKey);let userCount=0;
+      if(Number(userMax)>0)userCount=increment(userKey);
+      let retry=0;
+      if(ipCount>Number(ipMax)){if(!liveRedisValue(ipCooldownKey))storeRedisValue(ipCooldownKey,'1',Number(cooldownMs));retry=Math.max(retry,ttl(ipCooldownKey));}
+      if(Number(userMax)>0&&userCount>Number(userMax)){if(!liveRedisValue(userCooldownKey))storeRedisValue(userCooldownKey,'1',Number(cooldownMs));retry=Math.max(retry,ttl(userCooldownKey));}
+      return retry>0?[1,retry,ipCount,userCount]:[0,Math.max(ttl(ipKey),Number(userMax)>0?ttl(userKey):-2),ipCount,userCount];
+    }
+    if(n===1&&script.includes("ARGV[2] == ''")) {
+      const [key,claim,replacement,ttlMs]=args;
+      if(liveRedisValue(key)?.value!==claim)return 0;
+      if(replacement===''){deliveryValues.delete(key);return 1;}
+      storeRedisValue(key,replacement,Number(ttlMs));return 'OK';
+    }
+    const [key,value]=args;
+    if(await this.get(key)===value)return deliveryValues.delete(key)?1:0;
+    return 0;
+  },
 };
 globalThis.__receiptTest = { prisma, kafkaEvents, deliveryRedis };
-await build({ entryPoints: ['src/services/explore.service.ts', 'src/services/social-interaction.service.ts', 'src/services/push-device.service.ts', 'src/services/push-delivery.service.ts', 'src/services/expo-push.provider.ts', 'src/services/delivery-state.service.ts', 'src/routes/push.routes.ts', 'src/socket/push.handler.ts', 'src/config/push.ts', 'src/socket/authenticate.ts', 'src/config/media.ts', 'src/services/post.service.ts', 'src/services/user.service.ts', 'src/services/activity.service.ts', 'src/services/media.service.ts', 'src/routes/media.routes.ts', 'src/routes/post.routes.ts', 'src/routes/activity.routes.ts', 'src/routes/user.routes.ts', 'src/middlewares/media-access.ts', 'src/middlewares/upload.ts', 'src/services/message.service.ts', 'src/services/receipt-outbox.service.ts', 'src/socket/chat.handler.ts', 'src/kafka/consumer.ts', 'src/routes/message.routes.ts'],
+await build({ entryPoints: ['src/services/explore.service.ts', 'src/services/social-interaction.service.ts', 'src/services/push-device.service.ts', 'src/services/push-delivery.service.ts', 'src/services/expo-push.provider.ts', 'src/services/delivery-state.service.ts', 'src/services/google-auth.service.ts', 'src/services/community.service.ts', 'src/services/sticker.service.ts', 'src/routes/push.routes.ts', 'src/routes/community.routes.ts', 'src/routes/sticker.routes.ts', 'src/socket/push.handler.ts', 'src/config/push.ts', 'src/socket/authenticate.ts', 'src/config/media.ts', 'src/services/post.service.ts', 'src/services/user.service.ts', 'src/services/activity.service.ts', 'src/services/media.service.ts', 'src/routes/media.routes.ts', 'src/routes/post.routes.ts', 'src/routes/activity.routes.ts', 'src/routes/user.routes.ts', 'src/middlewares/abuse-protection.ts', 'src/middlewares/media-access.ts', 'src/middlewares/upload.ts', 'src/services/message.service.ts', 'src/services/receipt-outbox.service.ts', 'src/socket/chat.handler.ts', 'src/kafka/consumer.ts', 'src/routes/message.routes.ts'],
   bundle: true, platform: 'node', format: 'esm', outdir: '.cache/bundles', packages: 'external',
   plugins: [{ name: 'boundaries', setup(b) {
     b.onResolve({ filter: /config\/redis\.js$/ }, () => ({ path: 'redis', namespace: 'test' }));
@@ -77,7 +111,7 @@ const ids = Array.from({length:4}, () => randomUUID());
 for (const id of ids) await prisma.user.create({ data: { id, username: id, email: `${id}@test.dev`, passwordHash: 'unused' } });
 const [sender, reader, third, stranger] = ids;
 async function conversation(isGroup = false) {
-  return prisma.conversation.create({ data: { isGroup, participants: { create: (isGroup ? ids.slice(0,3) : ids.slice(0,2)).map(userId => ({userId})) } } });
+  return prisma.conversation.create({ data: { isGroup, kind: isGroup ? 'GROUP' : 'DIRECT', participants: { create: (isGroup ? ids.slice(0,3) : ids.slice(0,2)).map(userId => ({userId})) } } });
 }
 const dm = await conversation();
 const group = await conversation(true);
@@ -472,7 +506,7 @@ test('additive media/activity migration preserves legacy comments and dangling n
   const legacy = new PGlite();
   try {
     const directories = readdirSync('prisma/migrations').filter(d => !d.endsWith('.toml')).sort();
-    const added = ['20261031000000_media_comments_activity', '20261031010000_notification_lifecycle'];
+    const added = ['20261031000000_media_comments_activity', '20261031010000_notification_lifecycle', '20261104000000_google_channels_stickers_abuse'];
     for (const dir of directories.filter(d => !added.includes(d))) await legacy.exec(readFileSync(`prisma/migrations/${dir}/migration.sql`,'utf8'));
     await legacy.exec(`INSERT INTO users(id,username,email,password_hash,updated_at) VALUES ('legacy','legacy','legacy@test.dev','hash',now());
       INSERT INTO posts(id,content,image_urls,author_id,updated_at) VALUES ('post','retained',ARRAY['https://example.com/image.png'],'legacy',now());
@@ -1375,4 +1409,244 @@ test('private profile setting and activity hydration obey post visibility and en
     const response=await fetch(`http://127.0.0.1:${http.address().port}/users/me`,{method:'PATCH',headers:auth,body:JSON.stringify({isPrivate:false})});assert.equal(response.status,200);assert.equal((await response.json()).data.isPrivate,false);
     const invalid=await fetch(`http://127.0.0.1:${http.address().port}/users/me`,{method:'PATCH',headers:auth,body:JSON.stringify({isPrivate:'false'})});assert.equal(invalid.status,400);
   }finally{await new Promise(resolve=>http.close(resolve));}
+});
+
+test('Redis abuse gates are atomic, category-scoped, per-user and per-IP, return Retry-After and fail closed', async()=>{
+  const {createAbuseProtection,socketClientIp}=await import('../.cache/bundles/middlewares/abuse-protection.js');
+  const oldTrustProxy=process.env.TRUST_PROXY_HOPS;
+  process.env.TRUST_PROXY_HOPS='0';assert.equal(socketClientIp('203.0.113.8','198.51.100.8'),'203.0.113.8');
+  process.env.TRUST_PROXY_HOPS='1';assert.equal(socketClientIp('203.0.113.8','198.51.100.8'),'198.51.100.8');
+  process.env.TRUST_PROXY_HOPS='2';assert.equal(socketClientIp('203.0.113.8','198.51.100.8, 192.0.2.8'),'198.51.100.8');
+  assert.equal(socketClientIp('203.0.113.8','spoofed'),'203.0.113.8');
+  if(oldTrustProxy===undefined)delete process.env.TRUST_PROXY_HOPS;else process.env.TRUST_PROXY_HOPS=oldTrustProxy;
+  const app=express();app.set('trust proxy',true);app.use((req,res,next)=>{req.user={userId:req.get('x-test-user')};next();});
+  app.get('/limited',createAbuseProtection()('stickers'),(req,res)=>res.json({ok:true}));
+  app.use((err,req,res,next)=>res.status(err.statusCode??500).json({error:'unavailable'}));
+  const http=app.listen(0,'127.0.0.1');await new Promise(resolve=>http.on('listening',resolve));
+  const url=`http://127.0.0.1:${http.address().port}/limited`;
+  const before={ip:process.env.ABUSE_STICKERS_IP_MAX,user:process.env.ABUSE_STICKERS_USER_MAX};
+  const request=(user,ip)=>fetch(url,{headers:{'x-test-user':user,'x-forwarded-for':ip}});
+  try{
+    process.env.ABUSE_STICKERS_IP_MAX='100';process.env.ABUSE_STICKERS_USER_MAX='2';
+    const u1=randomUUID(),u2=randomUUID(),ip1='198.51.100.31',ip2='198.51.100.32';
+    assert.equal((await request(u1,ip1)).status,200);assert.equal((await request(u1,ip2)).status,200);
+    const blockedUser=await request(u1,'198.51.100.33');assert.equal(blockedUser.status,429);assert.ok(Number(blockedUser.headers.get('retry-after'))>=1);
+    assert.equal((await request(u2,ip1)).status,200,'the same IP may use a different user budget');
+    process.env.ABUSE_STICKERS_IP_MAX='2';process.env.ABUSE_STICKERS_USER_MAX='100';
+    const ip3='198.51.100.34';assert.equal((await request(randomUUID(),ip3)).status,200);assert.equal((await request(randomUUID(),ip3)).status,200);
+    const blockedIp=await request(randomUUID(),ip3);assert.equal(blockedIp.status,429);assert.ok(blockedIp.headers.get('retry-after'));
+    process.env.ABUSE_STICKERS_IP_MAX='100';process.env.ABUSE_STICKERS_USER_MAX='8';
+    const parallelUser=randomUUID(),parallelIp='198.51.100.35';
+    const concurrent=await Promise.all(Array.from({length:24},()=>request(parallelUser,parallelIp)));
+    assert.equal(concurrent.filter(r=>r.status===200).length,8);assert.equal(concurrent.filter(r=>r.status===429).length,16);
+    deliveryRedisFails=true;const unavailable=await request(randomUUID(),'198.51.100.36');assert.equal(unavailable.status,503);assert.equal(unavailable.headers.get('retry-after'),'1');
+  }finally{
+    deliveryRedisFails=false;
+    for(const [key,value] of Object.entries({ABUSE_STICKERS_IP_MAX:before.ip,ABUSE_STICKERS_USER_MAX:before.user}))if(value===undefined)delete process.env[key];else process.env[key]=value;
+    await new Promise(resolve=>http.close(resolve));
+  }
+});
+
+test('Idempotency-Key prevents replay and body substitution without consuming failed requests',async()=>{
+  const {createIdempotencyGuard}=await import('../.cache/bundles/middlewares/abuse-protection.js');
+  const app=express();app.use(express.json());app.use((req,res,next)=>{req.user={userId:sender};next();});let mutations=0;
+  app.post('/mutate',createIdempotencyGuard()({required:true}), (req,res)=>{mutations++;res.status(201).json({mutations,body:req.body});});
+  app.post('/fail',createIdempotencyGuard()({required:true}), (req,res)=>res.status(400).json({error:'business validation'}));
+  app.use((err,req,res,next)=>res.status(err.statusCode??500).json({error:'unavailable'}));
+  const http=app.listen(0,'127.0.0.1');await new Promise(resolve=>http.on('listening',resolve));const base=`http://127.0.0.1:${http.address().port}`;
+  const key=randomUUID();const send=(path,body,requestKey=key)=>fetch(`${base}${path}`,{method:'POST',headers:{'Content-Type':'application/json',...(requestKey?{'Idempotency-Key':requestKey}:{})},body:JSON.stringify(body)});
+  try{
+    assert.equal((await send('/mutate',{value:1},null)).status,400);
+    assert.equal((await send('/mutate',{value:1})).status,201);
+    assert.equal((await send('/mutate',{value:1})).status,409);
+    assert.equal((await send('/mutate',{value:2})).status,409);assert.equal(mutations,1);
+    const retryKey=randomUUID();assert.equal((await send('/fail',{value:1},retryKey)).status,400);
+    assert.equal((await send('/mutate',{value:3},retryKey)).status,201,'non-success responses release their claim for a legitimate retry');
+  }finally{await new Promise(resolve=>http.close(resolve));}
+});
+
+test('Google ID tokens are claim-checked; signup, existing-account linking, sessions and unique identity ownership',async()=>{
+  const {createGoogleAuthService,validateGoogleClaims}=await import('../.cache/bundles/services/google-auth.service.js');
+  const saved=process.env.GOOGLE_CLIENT_ID;process.env.GOOGLE_CLIENT_ID='test-google-client.apps.googleusercontent.com';
+  const good=(sub,email)=>({sub,email,email_verified:true,iss:'https://accounts.google.com',aud:process.env.GOOGLE_CLIENT_ID,exp:Math.floor(Date.now()/1000)+300,name:'Verified Person'});
+  assert.equal(validateGoogleClaims(good('claim-check','CLAIM@EXAMPLE.TEST'),process.env.GOOGLE_CLIENT_ID).email,'claim@example.test');
+  for(const payload of [undefined,{...good('bad','x@example.test'),iss:'https://evil.example'}, {...good('bad','x@example.test'),aud:'other-client'}, {...good('bad','x@example.test'),exp:1}, {...good('bad','x@example.test'),email_verified:false}])
+    assert.throws(()=>validateGoogleClaims(payload,process.env.GOOGLE_CLIENT_ID),e=>e.statusCode===401);
+  const claims=new Map([['signup',good('google-sub-signup',`${randomUUID()}@google.test`)]]);
+  const verifier={async verifyIdToken({idToken,audience}){assert.equal(audience,process.env.GOOGLE_CLIENT_ID);if(idToken==='bad-signature')throw Error('bad signature');return {getPayload:()=>claims.get(idToken)};}};
+  const service=createGoogleAuthService({verifier,db:prisma,registrationEnabled:async()=>true});
+  try{
+    const created=await service.signIn('signup');assert.equal(created.user.email,claims.get('signup').email);assert.ok(created.accessToken&&created.refreshToken);assert.ok(!('passwordHash'in created.user));
+    assert.equal(jwt.verify(created.accessToken,process.env.JWT_SECRET).userId,created.user.id);
+    const identity=await prisma.googleIdentity.findUnique({where:{provider_providerSubject:{provider:'GOOGLE',providerSubject:'google-sub-signup'}}});assert.equal(identity.userId,created.user.id);
+    const again=await service.signIn('signup');assert.equal(again.user.id,created.user.id);assert.equal(await prisma.googleIdentity.count({where:{userId:created.user.id}}),1);
+    const existing=await prisma.user.create({data:{id:randomUUID(),username:randomUUID(),email:`${randomUUID()}@existing.test`,passwordHash:'unused'}});
+    claims.set('link-existing',good('google-sub-existing',existing.email.toUpperCase()));
+    await assert.rejects(service.signIn('link-existing'),e=>e.statusCode===409);
+    assert.equal(await prisma.googleIdentity.count({where:{providerSubject:'google-sub-existing'}}),0);
+    const linked=await service.linkAccount(existing.id,'link-existing');assert.equal(linked.linked,true);
+    const signedIn=await service.signIn('link-existing');assert.equal(signedIn.user.id,existing.id);
+    await assert.rejects(service.linkAccount(created.user.id,'link-existing'),e=>e.statusCode===409);
+    await assert.rejects(service.signIn('bad-signature'),e=>e.statusCode===401);
+  }finally{if(saved===undefined)delete process.env.GOOGLE_CLIENT_ID;else process.env.GOOGLE_CLIENT_ID=saved;}
+});
+
+test('groups and channels enforce member/admin permissions, paginate membership and retain durable events',async()=>{
+  const {communityService}=await import('../.cache/bundles/services/community.service.js');
+  const makeUser=async()=>{const id=randomUUID();return prisma.user.create({data:{id,username:id,email:`${id}@community.test`,passwordHash:'unused'}});};
+  const owner=await makeUser(),member=await makeUser(),third=await makeUser(),outsider=await makeUser(),extra=await makeUser();
+  await assert.rejects(communityService.createGroup(owner.id,{name:'Oversized group',memberIds:Array.from({length:500},()=>randomUUID())}),e=>e.statusCode===400);
+  const group=await communityService.createGroup(owner.id,{name:'Private group',description:'members only',memberIds:[member.id,third.id]});
+  assert.equal(group.kind,'GROUP');assert.equal(group.ownerId,owner.id);assert.equal(group.participants.find(p=>p.userId===owner.id).role,'ADMIN');
+  await assert.rejects(communityService.getGroup(group.id,outsider.id),e=>e.statusCode===403);
+  await assert.rejects(communityService.addGroupMembers(group.id,member.id,[extra.id]),e=>e.statusCode===403);
+  const groupMessage=await service.sendMessage(group.id,owner.id,'group persistence');assert.equal(groupMessage.isGroup,true);
+  await communityService.setGroupRole(group.id,owner.id,member.id,'ADMIN');
+  await communityService.addGroupMembers(group.id,member.id,[extra.id]);
+  assert.ok((await communityService.getGroup(group.id,extra.id)).participants.some(p=>p.userId===extra.id));
+  await assert.rejects(communityService.removeGroupMember(group.id,member.id,owner.id),e=>e.statusCode===403);
+  await communityService.removeGroupMember(group.id,owner.id,member.id);
+  await assert.rejects(service.requireMember(group.id,member.id),e=>e.statusCode===403);
+  await assert.rejects(communityService.removeGroupMember(group.id,owner.id,owner.id),e=>e.statusCode===403);
+  const second=await communityService.createGroup(owner.id,{name:'Second group',memberIds:[member.id]});
+  const firstPage=await communityService.listGroups(owner.id,1);assert.equal(firstPage.items.length,1);assert.equal(firstPage.hasMore,true);
+  const secondPage=await communityService.listGroups(owner.id,1,firstPage.nextCursor);assert.equal(secondPage.items.length,1);assert.notEqual(firstPage.items[0].id,secondPage.items[0].id);
+
+  const privateChannel=await communityService.createChannel(owner.id,{name:'Private channel',isPublic:false});
+  assert.ok(privateChannel.inviteToken);assert.equal('inviteTokenHash'in privateChannel.channel,false);
+  await assert.rejects(communityService.getChannel(privateChannel.channel.id,outsider.id),e=>e.statusCode===404);
+  await assert.rejects(communityService.joinChannel(privateChannel.channel.id,member.id,'wrong_invite_token_that_is_long_enough_123456'),e=>e.statusCode===404);
+  assert.equal((await communityService.joinChannel(privateChannel.channel.id,member.id,privateChannel.inviteToken)).joined,true);
+  assert.equal((await communityService.getChannel(privateChannel.channel.id,member.id)).role,'MEMBER');
+  await assert.rejects(service.sendMessage(privateChannel.channel.id,member.id,'not allowed'),e=>e.statusCode===403);
+  const rotate=await communityService.rotateChannelInvite(privateChannel.channel.id,owner.id);assert.notEqual(rotate.inviteToken,privateChannel.inviteToken);
+  await assert.rejects(communityService.joinChannel(privateChannel.channel.id,outsider.id,privateChannel.inviteToken),e=>e.statusCode===404);
+  await communityService.joinChannel(privateChannel.channel.id,outsider.id,rotate.inviteToken);
+  const announced=await service.sendMessage(privateChannel.channel.id,owner.id,'channel announcement');assert.equal(announced.isGroup,true);
+  const history=await service.getMessages(privateChannel.channel.id,member.id,1,20);assert.ok(history.messages.some(m=>m.id===announced.id));
+  await communityService.setChannelRole(privateChannel.channel.id,owner.id,member.id,'ADMIN');
+  const adminPost=await service.sendMessage(privateChannel.channel.id,member.id,'admin post');assert.equal(adminPost.senderId,member.id);
+  await assert.rejects(communityService.updateChannel(privateChannel.channel.id,member.id,{name:'not owner'}),e=>e.statusCode===403);
+
+  const publicChannel=await communityService.createChannel(owner.id,{name:'Public channel',isPublic:true,slug:`public-${randomUUID().slice(0,8)}`});
+  await communityService.createChannel(owner.id,{name:'Another public channel',isPublic:true,slug:`public-${randomUUID().slice(0,8)}`});
+  const publicView=await communityService.getChannel(publicChannel.channel.id,outsider.id);assert.equal(publicView.isMember,false);assert.equal('participants'in publicView,false);
+  assert.equal((await communityService.joinChannel(publicChannel.channel.id,outsider.id)).joined,true);
+  const publicPages=await communityService.listPublicChannels(1);assert.equal(publicPages.items.length,1);assert.equal(publicPages.hasMore,true);
+
+  kafkaFails=true;
+  try{
+    const durable=await communityService.createGroup(owner.id,{name:'Kafka outage still commits',memberIds:[third.id]});
+    await new Promise(resolve=>setTimeout(resolve,30));
+    const pending=await prisma.receiptOutbox.findMany();assert.ok(pending.some(row=>row.payload?.kind==='conversationMembership'&&row.payload?.event?.conversationId===durable.id));
+    kafkaFails=false;await prisma.receiptOutbox.updateMany({data:{availableAt:new Date(0)}});await publishReceipts();
+    assert.ok(events.some(e=>e.name==='conversationMembership'&&e.payload.conversationId===durable.id));
+  }finally{kafkaFails=false;}
+  assert.ok(second.id);
+});
+
+test('sticker packs enforce asset ownership and visibility; install, favorite, recent, and message flows',async()=>{
+  const {stickerService}=await import('../.cache/bundles/services/sticker.service.js');
+  const {authorizeMedia}=await import('../.cache/bundles/middlewares/media-access.js');
+  const makeUser=async()=>{const id=randomUUID();return prisma.user.create({data:{id,username:id,email:`${id}@stickers.test`,passwordHash:'unused'}});};
+  const owner=await makeUser(),senderUser=await makeUser(),outsider=await makeUser();
+  const media=async(userId)=>{const key=`images/${randomUUID()}.png`,url=`https://media.example.com/uploads/${key}`;return prisma.mediaAsset.create({data:{ownerId:userId,key,url,mimeType:'image/png',size:2048}});};
+  const firstAsset=await media(owner.id),secondAsset=await media(owner.id),privateAsset=await media(owner.id),foreignAsset=await media(outsider.id);
+  const pack=await stickerService.createPack(owner.id,{shortName:'tiny-friends',title:'Tiny Friends',description:'Original assets',isPublic:true,stickers:[{mediaUrl:firstAsset.url,emoji:'🙂'},{mediaUrl:secondAsset.url,emoji:'🎉'}]});
+  assert.equal(pack.stickers.length,2);assert.equal(pack.stickers[0].asset.url,firstAsset.url);
+  const strangerPacks=await stickerService.listPacks(outsider.id,10);assert.ok(strangerPacks.items.some(p=>p.id===pack.id));
+  const installed=await stickerService.installPack(senderUser.id,pack.id);assert.equal(installed.installed,true);assert.equal((await stickerService.installPack(senderUser.id,pack.id)).alreadyInstalled,true);
+  assert.equal((await stickerService.getPack(senderUser.id,pack.id)).installed,true);
+  const stickerId=pack.stickers[0].id;
+  assert.equal((await stickerService.favorite(senderUser.id,stickerId)).favorite,true);assert.equal((await stickerService.favorite(senderUser.id,stickerId)).alreadyFavorite,true);
+  assert.equal(await prisma.stickerFavorite.count({where:{userId:senderUser.id,stickerId}}),1);
+  const favoritePage=await stickerService.listFavorites(senderUser.id,10);assert.equal(favoritePage.items[0].id,stickerId);
+  const privatePack=await stickerService.createPack(owner.id,{shortName:'owner-private',title:'Owner private',isPublic:false,stickers:[{mediaUrl:privateAsset.url,emoji:'🫥'}]});
+  await assert.rejects(stickerService.getPack(senderUser.id,privatePack.id),e=>e.statusCode===404);
+  await assert.rejects(stickerService.installPack(senderUser.id,privatePack.id),e=>e.statusCode===404);
+  await assert.rejects(stickerService.createPack(senderUser.id,{shortName:'forged-asset',title:'No',isPublic:true,stickers:[{mediaUrl:foreignAsset.url}]}),e=>e.statusCode===400);
+  const dm=await prisma.conversation.create({data:{isGroup:false,kind:'DIRECT',participants:{create:[{userId:owner.id},{userId:senderUser.id}]}}});
+  const message=await service.sendMessage(dm.id,senderUser.id,'',owner.id,{type:'STICKER',stickerId});
+  assert.equal(message.type,'STICKER');assert.equal(message.stickerId,stickerId);assert.equal(message.mediaUrl,firstAsset.url);assert.equal(message.sticker.emoji,'🙂');
+  const recents=await stickerService.listRecents(senderUser.id,10);assert.equal(recents.items[0].id,stickerId);
+  await assert.rejects(service.sendMessage(dm.id,outsider.id,'',owner.id,{type:'STICKER',stickerId}),e=>e.statusCode===403);
+  await assert.rejects(service.sendMessage(dm.id,senderUser.id,'',owner.id,{type:'STICKER',stickerId:privatePack.stickers[0].id}),e=>e.statusCode===404);
+  const mediaCheck=async(userId,key)=>{let failure;await authorizeMedia({path:`/${key}`,user:userId?{userId}:undefined},{type(){},set(){}},error=>{failure=error;});return failure;};
+  assert.equal(await mediaCheck(undefined,firstAsset.key),undefined,'public pack media may be fetched without exposing owner uploads');
+  assert.equal((await mediaCheck(senderUser.id,privateAsset.key)).statusCode,403);
+  await stickerService.unfavorite(senderUser.id,stickerId);assert.equal(await prisma.stickerFavorite.count({where:{userId:senderUser.id,stickerId}}),0);
+  await stickerService.uninstallPack(senderUser.id,pack.id);assert.equal((await stickerService.getPack(senderUser.id,pack.id)).installed,false);
+  await service.deleteMessage(message.id,senderUser.id,'everyone');
+  const deleted=(await service.getMessages(dm.id,owner.id,1,20)).messages.find(row=>row.id===message.id);assert.equal(deleted.stickerId,null);assert.equal(deleted.sticker,null);
+});
+
+test('community HTTP requires authenticated identity and idempotency keys on resource creation',async()=>{
+  const {default:communityRouter}=await import('../.cache/bundles/routes/community.routes.js');
+  const makeUser=async()=>{const id=randomUUID();return prisma.user.create({data:{id,username:id,email:`${id}@community-http.test`,passwordHash:'unused'}});};
+  const owner=await makeUser(),member=await makeUser();const app=express();app.use(express.json());app.use('/communities',communityRouter);
+  app.use((err,req,res,next)=>res.status(err.statusCode??500).json({success:false,message:'Rejected'}));
+  const http=app.listen(0,'127.0.0.1');await new Promise(resolve=>http.on('listening',resolve));const base=`http://127.0.0.1:${http.address().port}/communities/groups`;
+  const headers={Authorization:`Bearer ${jwt.sign({userId:owner.id,email:owner.email,username:owner.username},process.env.JWT_SECRET)}`,'Content-Type':'application/json'};
+  const body={name:'HTTP group',memberIds:[member.id]};
+  try{
+    assert.equal((await fetch(base,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).status,401);
+    assert.equal((await fetch(base,{method:'POST',headers,body:JSON.stringify(body)})).status,400);
+    const key=randomUUID();const request=()=>fetch(base,{method:'POST',headers:{...headers,'Idempotency-Key':key},body:JSON.stringify(body)});
+    const created=await request();assert.equal(created.status,201);const group=(await created.json()).data;assert.equal(group.ownerId,owner.id);
+    assert.equal((await request()).status,409);
+    const list=await(await fetch(base,{headers})).json();assert.ok(list.data.items.some(item=>item.id===group.id));
+  }finally{await new Promise(resolve=>http.close(resolve));}
+});
+
+test('new migration adds identity, channel and sticker structures while preserving legacy conversation membership',async()=>{
+  const legacy=new PGlite();
+  try{
+    const directories=readdirSync('prisma/migrations').filter(d=>!d.endsWith('.toml')).sort();
+    const last='20261104000000_google_channels_stickers_abuse';
+    for(const dir of directories.filter(d=>d!==last))await legacy.exec(readFileSync(`prisma/migrations/${dir}/migration.sql`,'utf8'));
+    await legacy.exec(`INSERT INTO users(id,username,email,password_hash,updated_at) VALUES
+      ('owner','owner','owner@migration.test','hash',now()),('member','member','member@migration.test','hash',now());
+      INSERT INTO conversations(id,is_group,group_name,created_at,updated_at) VALUES
+      ('legacy-group',true,'Preserve group',now(),now()),('legacy-dm',false,NULL,now(),now());
+      INSERT INTO conversation_participants(conversation_id,user_id,joined_at) VALUES
+      ('legacy-group','owner',now()-interval '2 minutes'),('legacy-group','member',now()-interval '1 minute'),
+      ('legacy-dm','owner',now()),('legacy-dm','member',now());`);
+    await legacy.exec(readFileSync(`prisma/migrations/${last}/migration.sql`,'utf8'));
+    const group=(await legacy.query(`SELECT kind::text,owner_id FROM conversations WHERE id='legacy-group'`)).rows[0];
+    assert.deepEqual(group,{kind:'GROUP',owner_id:'owner'});
+    assert.equal((await legacy.query(`SELECT role::text FROM conversation_participants WHERE conversation_id='legacy-group' AND user_id='owner'`)).rows[0].role,'ADMIN');
+    assert.equal((await legacy.query(`SELECT kind::text FROM conversations WHERE id='legacy-dm'`)).rows[0].kind,'DIRECT');
+    assert.equal((await legacy.query('SELECT count(*)::int AS n FROM google_identities')).rows[0].n,0);
+    assert.equal((await legacy.query('SELECT count(*)::int AS n FROM stickers')).rows[0].n,0);
+    await assert.rejects(legacy.exec(`INSERT INTO conversations(id,is_group,kind,created_at,updated_at) VALUES ('mismatch',false,'GROUP',now(),now())`));
+  }finally{await legacy.close();}
+});
+
+test('Kafka consumer validates and routes durable group/channel membership and sticker events',async()=>{
+  const emitted=[],left=[];const io={
+    to(room){return{emit:(name,event)=>emitted.push({room,name,event})};},
+    in(room){return{socketsLeave:async target=>left.push({room,target})};},
+  };
+  const membership={eventId:randomUUID(),conversationId:randomUUID(),kind:'CHANNEL',action:'member-removed',actorId:sender,memberIds:[reader],occurredAt:new Date().toISOString()};
+  await routeEvent(io,'chat.membership',membership);
+  assert.deepEqual(left,[{room:`user:${reader}`,target:`conversation:${membership.conversationId}`}]);
+  assert.ok(emitted.some(e=>e.room===`conversation:${membership.conversationId}`&&e.name==='channel:membership'));
+  assert.ok(emitted.some(e=>(e.room===`user:${reader}`||(Array.isArray(e.room)&&e.room.includes(`user:${reader}`)))&&e.name==='channel:membership'));
+  await routeEvent(io,'chat.stickers',{eventId:randomUUID(),action:'created',actorId:sender,packId:randomUUID(),isPublic:true});
+  assert.ok(emitted.some(e=>e.room===`user:${sender}`&&e.name==='stickers:pack-changed'));
+  await assert.rejects(routeEvent(io,'chat.membership',{...membership,conversationId:'invalid'}));
+});
+
+test('message edits and direct-conversation deletion commit with durable outbox retries during Kafka failure',async()=>{
+  const c=await conversation();const original=await service.sendMessage(c.id,sender,'before',reader);
+  events.length=0;kafkaFails=true;
+  try{
+    const edited=await service.editMessage(original.id,sender,'after');assert.equal(edited.content,'after');
+    const deleted=await service.deleteConversation(c.id,sender);assert.equal(deleted.conversationId,c.id);
+  }finally{kafkaFails=false;}
+  assert.equal((await prisma.message.findUnique({where:{id:original.id}})).content,'after');
+  assert.ok((await prisma.conversationParticipant.findUnique({where:{conversationId_userId:{conversationId:c.id,userId:sender}}})).deletedAt);
+  await prisma.receiptOutbox.updateMany({data:{availableAt:new Date(0)}});await publishReceipts();
+  assert.ok(events.some(e=>e.name==='messageEdited'&&e.payload.messageId===original.id));
+  assert.ok(events.some(e=>e.name==='conversationDeleted'&&e.payload.conversationId===c.id));
 });

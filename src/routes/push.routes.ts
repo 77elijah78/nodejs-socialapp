@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { rateLimit } from 'express-rate-limit';
+import { abuseProtection } from '../middlewares/abuse-protection.js';
 import { z } from 'zod';
 import { authenticate } from '../middlewares/authenticate.js';
 import { validate } from '../middlewares/validate.js';
@@ -13,7 +13,7 @@ export const pushTokenInput = z.object({ deviceId: z.string().uuid(), platform: 
 });
 const router = Router();
 router.use(authenticate);
-router.use(rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false }));
+router.use(abuseProtection('push'));
 router.post('/devices', validate(z.object({ body: pushTokenInput })), async (req, res, next) => {
   try { sendSuccess(res, await pushDeviceService.register((req as AuthRequest).user.userId, req.body), 'Device registered'); }
   catch (error) { next(error); }

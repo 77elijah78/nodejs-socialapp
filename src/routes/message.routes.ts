@@ -1,12 +1,14 @@
 import { Router } from 'express';
 import { messageController } from '../controllers/message.controller.js';
 import { authenticate } from '../middlewares/authenticate.js';
+import { abuseProtection, idempotencyGuard } from '../middlewares/abuse-protection.js';
 import { validate } from '../middlewares/validate.js';
 import { batchDeleteSchema, deleteMessageSchema, editMessageSchema, syncReceiptsSchema, sendMessageSchema, startConversationSchema, deleteConversationSchema, forwardMessageSchema, markDeliveredSchema, replyMessageSchema } from '../middlewares/schemas.js';
 
 const router = Router();
 
 router.use(authenticate);
+router.use(abuseProtection('messages'));
 router.post('/messages/delete-batch', validate(batchDeleteSchema), messageController.deleteMessages);
 router.post('/receipts/sync', validate(syncReceiptsSchema), messageController.syncReceipts);
 
@@ -18,12 +20,14 @@ router.get('/conversations/:conversationId/messages', messageController.getMessa
 router.post(
   '/conversations/:conversationId/messages',
   validate(sendMessageSchema),
+  idempotencyGuard(),
   messageController.sendMessage
 );
 
 router.post(
   '/conversations/:conversationId/reply',
   validate(replyMessageSchema),
+  idempotencyGuard(),
   messageController.replyMessage
 );
 

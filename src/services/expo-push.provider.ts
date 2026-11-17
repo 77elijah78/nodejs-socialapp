@@ -49,7 +49,7 @@ export async function sendExpoPush(payload: ExpoPushPayload) {
   return item.id;
 }
 export async function getExpoReceipt(ticketId: string) {
-  const response = z.object({ data: z.record(responseItem) }).safeParse(await request('getReceipts', { ids: [ticketId] }));
+  const response = z.object({ data: z.record(z.string(), responseItem) }).safeParse(await request('getReceipts', { ids: [ticketId] }));
   if (!response.success) throw new PushProviderError('InvalidReceiptResponse', true);
   return response.data.data[ticketId] ?? null;
 }

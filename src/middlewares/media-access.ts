@@ -12,12 +12,20 @@ export async function authorizeMedia(req: Request, res: Response, next: NextFunc
     const userId = (req as AuthRequest).user?.userId;
     const asset = await prisma.mediaAsset.findUnique({ where: { key } });
     if (asset) { res.type(asset.mimeType); url = asset.sourceUrl ?? url; }
-    const [post, avatar, story] = await Promise.all([
+    const [post, avatar, story, sticker] = await Promise.all([
       prisma.post.findFirst({ where: { ...visiblePosts(userId), OR: [{ imageUrls: { has: url } }, { videoUrl: url }] }, select: { id: true } }),
       prisma.user.findFirst({ where: { avatarUrl: url, deletedAt: null, accountStatus: 'ACTIVE' }, select: { id: true } }),
       userId ? prisma.story.findFirst({ where: { mediaUrl: url, deletedAt: null, expiresAt: { gt: new Date() }, user: { deletedAt: null, accountStatus: 'ACTIVE', OR: [{ isPrivate: false }, { id: userId }] } }, select: { id: true } }) : null,
+      asset ? prisma.sticker.findFirst({ where: { mediaAssetId: asset.id, OR: [
+        { pack: { isPublic: true } },
+        ...(userId ? [
+          { pack: { ownerId: userId } },
+          { pack: { installs: { some: { userId } } } },
+          { messages: { some: { deletedAt: null, deletions: { none: { userId } }, conversation: { participants: { some: { userId, deletedAt: null } } } } } },
+        ] : []),
+      ] }, select: { id: true } }) : null,
     ]);
-    if (post || avatar || story || (userId && asset?.ownerId === userId)) {
+    if (post || avatar || story || sticker || (userId && asset?.ownerId === userId)) {
       // Visibility can change after an earlier public response; do not cache protected media.
       res.set('Cache-Control', 'private, no-store');
       return next();

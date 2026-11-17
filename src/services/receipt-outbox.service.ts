@@ -21,7 +21,7 @@ export async function publishReceipts(id?: string): Promise<void> {
       const payload = row.payload as { kind?: string; event?: object };
       if (payload.kind) {
         const publishers = kafkaEvents as unknown as Record<string, (event: object) => Promise<void>>;
-        if (!['socialInteraction', 'notificationState', 'notificationUpdated', 'notification', 'chatMessage', 'messageDelivered', 'messageDeleted', 'messageDeletedForMe'].includes(payload.kind)) throw new Error('Unknown outbox event');
+        if (!['socialInteraction', 'notificationState', 'notificationUpdated', 'notification', 'chatMessage', 'messageDelivered', 'messageDeleted', 'messageDeletedForMe', 'conversationDeleted', 'messageEdited', 'conversationMembership', 'stickerPackChanged'].includes(payload.kind)) throw new Error('Unknown outbox event');
         await publishers[payload.kind](payload.event!);
       } else await kafkaEvents.messageRead(row.payload as MessageReadEvent);
       await prisma.receiptOutbox.deleteMany({ where: { id: row.id, claimToken: token } });

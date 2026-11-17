@@ -5,9 +5,11 @@ import { z } from 'zod';
 import { messageInclude, serializeMessage } from './message.dto.js';
 import { prisma } from '../config/database.js';
 import { AppError, ConflictError, NotFoundError, ForbiddenError, ValidationError } from '../utils/errors.js';
-import { kafkaEvents } from '../kafka/producer.js';
 import { logger } from '../config/logger.js';
 import { publishReceipts } from './receipt-outbox.service.js';
+import { stickerService } from './sticker.service.js';
+import { communityService } from './community.service.js';
+import { enqueueDomainEvent } from './domain-outbox.service.js';
 import { Prisma, type MessageType } from '@prisma/client';
 
 
@@ -29,7 +31,7 @@ async function recipientsFor(conversationId: string, senderId: string, receiverI
   const recipients = conversation.participants.filter(p => p.userId !== senderId).map(p => p.userId);
   if (!recipients.length || (receiverId && !recipients.includes(receiverId)) ||
     (!conversation.isGroup && recipients.length !== 1)) throw new ValidationError('Invalid recipients');
-  return { recipients, isGroup: conversation.isGroup };
+  return { recipients, isGroup: conversation.isGroup, kind: conversation.kind };
 }
 async function receiptDTOs<T extends { id: string; conversationId: string; deletedAt?: Date | null }>(messages: T[], userId: string) {
   const [receipts, conversations] = await Promise.all([
@@ -185,11 +187,18 @@ export const messageService = {
       fileMimeType?: string | null;
       fileSize?: number | null;
       sharedReference?: Prisma.InputJsonValue;
+      stickerId?: string | null;
       notificationAction?: NotificationReplyAction;
     },
     afterPersist?: (tx: Prisma.TransactionClient) => Promise<void>,
   ) {
     for (const url of [options?.mediaUrl, options?.thumbnailUrl]) if (url && !isSharedMediaUrl(url)) throw new ValidationError('Invalid shared media URL');
+    if (options?.type === 'STICKER') {
+      if (!options.stickerId || content?.trim() || options.mediaUrl || options.thumbnailUrl || options.duration != null ||
+          options.fileName || options.fileMimeType || options.fileSize != null || options.sharedReference || options.forwardedFromId) {
+        throw new ValidationError('Sticker messages must contain only a sticker ID and optional reply target');
+      }
+    } else if (options?.stickerId) throw new ValidationError('Sticker ID is only valid for sticker messages');
     const participant = await prisma.conversationParticipant.findUnique({
       where: { conversationId_userId: { conversationId, userId: senderId } },
     });
@@ -226,7 +235,13 @@ export const messageService = {
     await tx.$queryRaw`SELECT user_id FROM conversation_participants WHERE conversation_id=${conversationId} ORDER BY user_id FOR SHARE`;
     const currentMember = await tx.conversationParticipant.findUnique({ where: { conversationId_userId: { conversationId, userId: senderId } } });
     if (!currentMember || currentMember.deletedAt) throw new ForbiddenError('Not an active participant');
-    const { recipients, isGroup } = await recipientsFor(conversationId, senderId, receiverId, tx);
+    const { recipients, isGroup, kind: conversationKind } = await recipientsFor(conversationId, senderId, receiverId, tx);
+    if (conversationKind === 'CHANNEL' && currentMember.role !== 'ADMIN') throw new ForbiddenError('Only channel administrators can post');
+    let persistedMediaUrl = options?.mediaUrl ?? null;
+    if (options?.type === 'STICKER' && options.stickerId) {
+      const sticker = await stickerService.resolveMessageSticker(tx, senderId, options.stickerId);
+      persistedMediaUrl = sticker.asset.url;
+    }
     const requestHash = action ? createHash('sha256').update(JSON.stringify([
       conversationId, content, receiverId ?? null, options?.repliedToId, action.contractVersion, action.actionId, action.recipientUserId, action.deviceId, action.notificationId,
     ])).digest('hex') : null;
@@ -256,9 +271,10 @@ export const messageService = {
         content: content ?? '',
         fileName: options?.fileName, fileMimeType: options?.fileMimeType,
         fileSize: options?.fileSize, sharedReference: options?.sharedReference,
-        mediaUrl: options?.mediaUrl ?? null,
+        mediaUrl: persistedMediaUrl,
         thumbnailUrl: options?.thumbnailUrl ?? null,
         type: options?.type ?? 'TEXT',
+        stickerId: options?.stickerId ?? null,
         status: 'SENT',
         senderId,
         receiverId: recipients.length === 1 ? recipients[0] : null,
@@ -270,6 +286,8 @@ export const messageService = {
       },
       include: messageInclude,
     });
+
+    if (options?.type === 'STICKER' && options.stickerId) await stickerService.recordRecent(tx, senderId, options.stickerId);
 
     await tx.conversation.update({
       where: { id: conversationId },
@@ -311,28 +329,29 @@ export const messageService = {
   },
 
   async editMessage(messageId: string, userId: string, newContent: string) {
-    const message = await prisma.message.findUnique({ where: { id: messageId } });
-    if (!message) throw new NotFoundError('Message');
-    await requireMember(message.conversationId, userId);
-    if (message.deletedAt) throw new ValidationError('Cannot edit deleted message');
-    if (message.senderId !== userId) throw new ForbiddenError('Cannot edit someone else\'s message');
+    const updated = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM messages WHERE id=${messageId} FOR UPDATE`;
+      const message = await tx.message.findUnique({ where: { id: messageId } });
+      if (!message) throw new NotFoundError('Message');
+      const participant = await tx.conversationParticipant.findUnique({ where: {
+        conversationId_userId: { conversationId: message.conversationId, userId },
+      } });
+      if (!participant || participant.deletedAt) throw new ForbiddenError('Not an active participant');
+      if (message.deletedAt) throw new ValidationError('Cannot edit deleted message');
+      if (message.type === 'STICKER') throw new ValidationError('Sticker messages cannot be edited');
+      if (message.senderId !== userId) throw new ForbiddenError('Cannot edit someone else\'s message');
 
-    const updated = await prisma.message.update({
-      where: { id: messageId },
-      data: { content: newContent, editedAt: new Date() },
-      include: {
-        sender: { select: { id: true, username: true, avatarUrl: true } },
-      },
+      const result = await tx.message.update({
+        where: { id: messageId },
+        data: { content: newContent, editedAt: new Date() },
+        include: { sender: { select: { id: true, username: true, avatarUrl: true } } },
+      });
+      await enqueueDomainEvent(tx, 'messageEdited', {
+        messageId, conversationId: message.conversationId, content: newContent, editedAt: result.editedAt!.toISOString(),
+      });
+      return result;
     });
-
-    // Notify conversation room via socket (emit through Kafka)
-    await kafkaEvents.messageEdited({
-      messageId,
-      conversationId: message.conversationId,
-      content: newContent,
-      editedAt: updated.editedAt!.toISOString(),
-    });
-
+    void publishReceipts().catch(() => logger.warn('Message edit outbox will retry'));
     return updated;
   },
 
@@ -356,7 +375,7 @@ export const messageService = {
         if (message.senderId !== userId) throw new ForbiddenError('Only the sender can delete for everyone');
         if (!message.deletedAt) await tx.message.update({ where: { id: messageId }, data: {
           content: '', mediaUrl: null, thumbnailUrl: null, duration: null, fileName: null,
-          fileMimeType: null, fileSize: null, sharedReference: Prisma.JsonNull,
+          fileMimeType: null, fileSize: null, sharedReference: Prisma.JsonNull, stickerId: null,
           deletedAt: now, deletedBy: userId,
         } });
         kind = 'messageDeleted';
@@ -534,27 +553,24 @@ export const messageService = {
   },
 
   async deleteConversation(conversationId: string, userId: string) {
-    const participant = await prisma.conversationParticipant.findUnique({
-      where: { conversationId_userId: { conversationId, userId } },
+    const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, kind: true } });
+    if (!conversation) throw new NotFoundError('Conversation');
+    if (conversation.kind === 'GROUP') return communityService.removeGroupMember(conversationId, userId, userId);
+    if (conversation.kind === 'CHANNEL') return communityService.leaveChannel(conversationId, userId);
+
+    const deletedAt = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT conversation_id FROM conversation_participants WHERE conversation_id=${conversationId} AND user_id=${userId} FOR UPDATE`;
+      const participant = await tx.conversationParticipant.findUnique({ where: {
+        conversationId_userId: { conversationId, userId },
+      } });
+      if (!participant) throw new NotFoundError('Conversation');
+      if (participant.deletedAt) throw new ValidationError('Conversation already deleted');
+      const at = new Date();
+      await tx.conversationParticipant.update({ where: { conversationId_userId: { conversationId, userId } }, data: { deletedAt: at } });
+      await enqueueDomainEvent(tx, 'conversationDeleted', { conversationId, userId, deletedAt: at.toISOString() });
+      return at;
     });
-    if (!participant) throw new NotFoundError('Conversation');
-
-    if (participant.deletedAt) {
-      throw new ValidationError('Conversation already deleted');
-    }
-
-    const now = new Date();
-    await prisma.conversationParticipant.update({
-      where: { conversationId_userId: { conversationId, userId } },
-      data: { deletedAt: now },
-    });
-
-    await kafkaEvents.conversationDeleted({
-      conversationId,
-      userId,
-      deletedAt: now.toISOString(),
-    });
-
-    return { conversationId, deletedAt: now.toISOString() };
+    void publishReceipts().catch(() => logger.warn('Conversation deletion outbox will retry'));
+    return { conversationId, deletedAt: deletedAt.toISOString() };
   },
 };

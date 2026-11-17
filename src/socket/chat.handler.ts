@@ -4,14 +4,16 @@ import { Server } from 'socket.io';
 import { AuthenticatedSocket } from './index.js';
 import { messageService } from '../services/message.service.js';
 import { logger } from '../config/logger.js';
+import { consumeAbuseLimit, socketClientIp } from '../middlewares/abuse-protection.js';
 
 interface SendMessagePayload {
   conversationId: string;
-  content: string;
+  content?: string;
   receiverId?: string;
   mediaUrl?: string | null;
   thumbnailUrl?: string | null;
   type?: string;
+  stickerId?: string;
   duration?: number | null;
   repliedToId?: string | null;
   forwardedFromId?: string | null;
@@ -66,9 +68,21 @@ interface ForwardPayload {
 }
 
 export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): void => {
+  const throttled = async (ack?: Function): Promise<boolean> => {
+    try {
+      const result = await consumeAbuseLimit('messages', socket.userId, socketClientIp(socket.handshake.address, socket.handshake.headers['x-forwarded-for']));
+      if (!result.limited) return false;
+      ack?.({ success: false, error: 'Too many requests', retryAfter: result.retryAfter });
+      return true;
+    } catch {
+      ack?.({ success: false, error: 'Request protection is temporarily unavailable', retryAfter: 1 });
+      return true;
+    }
+  };
+
   // Join a conversation room
   socket.on('conversation:join', async (conversationId: string, ack?: Function) => {
-    try { await messageService.requireMember(z.string().uuid().parse(conversationId), socket.userId);
+    try { if (await throttled(ack)) return; await messageService.requireMember(z.string().uuid().parse(conversationId), socket.userId);
     await socket.join(`conversation:${conversationId}`);
     ack?.({ success: true });
     } catch (error) { ack?.({ success: false, error: (error as Error).message }); }
@@ -83,6 +97,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Delete (archive) a conversation for the current user
   socket.on('conversation:delete', async (payload: DeleteConversationPayload, ack?: Function) => {
     try {
+      if (await throttled(ack)) return;
       await messageService.deleteConversation(payload.conversationId, socket.userId);
       socket.leave(`conversation:${payload.conversationId}`);
       ack?.({ success: true, conversationId: payload.conversationId });
@@ -95,6 +110,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Send message via WebSocket
   socket.on('message:send', async (payload: SendMessagePayload, ack?: Function) => {
     try {
+      if (await throttled(ack)) return;
       sendMessageSchema.parse({ body: payload, params: { conversationId: payload.conversationId } });
       const { conversationId, content, receiverId, mediaUrl, thumbnailUrl, type, duration, repliedToId, forwardedFromId } = payload;
 
@@ -116,6 +132,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Reply to a message via WebSocket
   socket.on('message:reply', async (payload: ReplyPayload, ack?: Function) => {
     try {
+      if (await throttled(ack)) return;
       replyMessageSchema.parse({ body: payload, params: { conversationId: payload.conversationId } });
       const { conversationId, content, repliedToId, receiverId, mediaUrl, thumbnailUrl, type, duration } = payload;
 
@@ -137,7 +154,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
 
   // Typing indicator
   socket.on('message:typing', async (payload: TypingPayload) => {
-    try { await messageService.requireMember(payload.conversationId, socket.userId); } catch { return; }
+    try { if (await throttled()) return; await messageService.requireMember(payload.conversationId, socket.userId); } catch { return; }
     socket
       .to(`conversation:${payload.conversationId}`)
       .emit('message:typing', {
@@ -151,6 +168,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Mark messages as read
   socket.on('message:read', async (payload: ReadPayload, ack?: (result: object) => void) => {
     try {
+      if (await throttled(ack)) return;
       const input = z.object({ conversationId: z.string().uuid(), messageId: z.string().uuid() }).parse(payload);
       await messageService.markMessageRead(input.conversationId, socket.userId, input.messageId);
       if (typeof ack === 'function') ack({ success: true });
@@ -163,6 +181,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Mark messages as delivered
   socket.on('message:delivered', async (payload: DeliveredPayload) => {
     try {
+      if (await throttled()) return;
       logger.info('[WS] delivery ACK received:', {
         userId: socket.userId,
         socketId: socket.id,
@@ -181,6 +200,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Edit message via WebSocket
   socket.on('message:edit', async (payload: EditPayload, ack?: Function) => {
     try {
+      if (await throttled(ack)) return;
       const message = await messageService.editMessage(payload.messageId, socket.userId, payload.content);
       ack?.({ success: true, messageId: message.id, message });
     } catch (err) {
@@ -191,6 +211,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
 
   socket.on('message:delete-batch', async (payload: unknown, ack?: Function) => {
     try {
+      if (await throttled(ack)) return;
       const input = batchDeletePayload.parse(payload);
       const result = await messageService.deleteMessages(input.conversationId, socket.userId, input.messageIds, input.deleteFor);
       ack?.({ success: true, ...result });
@@ -200,6 +221,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Delete message via WebSocket
   socket.on('message:delete', async (payload: DeletePayload, ack?: Function) => {
     try {
+      if (await throttled(ack)) return;
       await messageService.deleteMessage(payload.messageId, socket.userId, payload.deleteFor, payload.conversationId);
       ack?.({ success: true, messageId: payload.messageId });
     } catch (err) {
@@ -211,6 +233,7 @@ export const registerChatHandlers = (io: Server, socket: AuthenticatedSocket): v
   // Forward message via WebSocket
   socket.on('message:forward', async (payload: ForwardPayload, ack?: Function) => {
     try {
+      if (await throttled(ack)) return;
       const forwarded = await messageService.forwardMessage(payload.messageId, socket.userId, payload.targetConversationId);
       ack?.({ success: true, messageId: forwarded.id, targetConversationId: payload.targetConversationId });
     } catch (err) {

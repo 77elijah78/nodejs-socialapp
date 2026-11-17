@@ -1,4 +1,4 @@
-import { rateLimit } from "express-rate-limit";
+import { abuseProtection } from "../middlewares/abuse-protection.js";
 import { Router } from "express";
 import { mediaController } from "../controllers/media.controller.js";
 import { authenticate } from "../middlewares/authenticate.js";
@@ -13,7 +13,7 @@ const router = Router();
 
 // All media endpoints require auth
 router.use(authenticate);
-router.use(rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: "draft-7", legacyHeaders: false }));
+router.use(abuseProtection('media'));
 
 // ─── Single file (image / video / audio) ──────────────────────────
 // Used for message attachments and voice messages
