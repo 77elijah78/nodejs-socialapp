@@ -74,7 +74,7 @@ export const adminUsersService = {
           adminAccount: true,
           _count: {
             select: {
-              posts: true,
+              posts: { where: { deletedAt: null } },
               comments: true,
               followers: true,
               following: true,
@@ -104,7 +104,7 @@ export const adminUsersService = {
         adminAccount: true,
         _count: {
           select: {
-            posts: true,
+            posts: { where: { deletedAt: null } },
             stories: true,
             comments: true,
             likes: true,

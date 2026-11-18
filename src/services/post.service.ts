@@ -1,90 +1,100 @@
 import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { isSharedMediaUrl } from '../config/media.js';
 import { createActivity, publishActivity, withdrawActivity } from './activity.service.js';
+import { normalizeSharedMediaReferences, normalizeStoredMediaReferences, type MediaAssetReference } from './media-url.service.js';
 import { prisma } from '../config/database.js';
 import { NotFoundError, ForbiddenError, ConflictError, ValidationError } from '../utils/errors.js';
 import { messageService } from './message.service.js';
 
-const postSelect = {
-  id: true,
-  content: true,
-  imageUrls: true, mediaMetadata: true,
-  videoUrl: true,
-  createdAt: true,
-  updatedAt: true,
-  author: { select: { id: true, username: true, displayName: true, avatarUrl: true, isVerified: true } },
-  _count: { select: { likes: true, comments: { where: { deletedAt: null } } } },
-  shareCount: true,
-};
+import { postSelect, commentSelect, enrichPosts, enrichComments, visiblePosts } from './post.dto.js';
+import { enqueueSocial } from './social-interaction.service.js';
+import { decodeFeedCursor, encodeFeedCursor } from '../utils/feed-cursor.js';
 
-const commentSelect = {
-  id: true, postId: true, authorId: true,
-  content: true,
-  createdAt: true,
-  repliedToId: true,
-  author: { select: { id: true, username: true, avatarUrl: true } },
-};
+function metadataMediaUrls(value: Prisma.InputJsonValue | undefined): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    return ['url', 'thumbnailUrl'].flatMap(key => typeof record[key] === 'string' ? [record[key] as string] : []);
+  });
+}
+function normalizeMetadata(value: Prisma.InputJsonValue | undefined, replacements: Map<string, string>): Prisma.InputJsonValue | undefined {
+  if (!Array.isArray(value)) return value;
+  return value.map(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const record = { ...(item as Record<string, unknown>) };
+    for (const key of ['url', 'thumbnailUrl']) {
+      if (typeof record[key] === 'string') record[key] = replacements.get(record[key] as string) ?? record[key];
+    }
+    return record;
+  }) as Prisma.InputJsonValue;
+}
 
 export const postService = {
   async createPost(authorId: string, data: { content: string; imageUrls?: string[]; videoUrl?: string | null; mediaMetadata?: Prisma.InputJsonValue }) {
-    for (const url of [...(data.imageUrls ?? []), ...(data.videoUrl ? [data.videoUrl] : [])]) if (!isSharedMediaUrl(url)) throw new ValidationError('Invalid shared media URL');
-    if (!data.content?.trim() && !data.imageUrls?.length && !data.videoUrl) throw new ValidationError('Post content or media is required');
+    if ((data.imageUrls?.length ?? 0) > 4) throw new ValidationError('A post may contain at most four images');
+    const primaryUrls = [...(data.imageUrls ?? []), ...(data.videoUrl !== undefined && data.videoUrl !== null ? [data.videoUrl] : [])];
+    const mediaUrls = [...primaryUrls, ...metadataMediaUrls(data.mediaMetadata)];
+    const normalized = await normalizeSharedMediaReferences(mediaUrls, { ownerId: authorId, requireOwnership: true });
+    const replacements = new Map<string, string>();
+    mediaUrls.forEach((url, index) => replacements.set(url, normalized.values[index]!));
+    const normalizedImageUrls = (data.imageUrls ?? []).map(url => replacements.get(url)!);
+    const normalizedVideoUrl = typeof data.videoUrl === 'string' ? replacements.get(data.videoUrl)! : data.videoUrl;
+    const mediaMetadata = normalizeMetadata(data.mediaMetadata, replacements);
+    if (!data.content?.trim() && !normalizedImageUrls.length && !normalizedVideoUrl) throw new ValidationError('Post content or media is required');
+    data = { ...data, imageUrls: normalizedImageUrls, videoUrl: normalizedVideoUrl, mediaMetadata };
     if (!data.mediaMetadata) {
-      const assets = await prisma.mediaAsset.findMany({ where: { url: { in: [...(data.imageUrls ?? []), ...(data.videoUrl ? [data.videoUrl] : [])] } } });
-      if (assets.length) data = { ...data, mediaMetadata: assets.map(a => ({ url: a.url, mimeType: a.mimeType, size: a.size })) };
+      const assets = new Map<string, { asset: MediaAssetReference; url: string }>();
+      primaryUrls.forEach(url => {
+        const asset = normalized.assetsByInput.get(url);
+        const canonicalUrl = replacements.get(url);
+        if (asset && canonicalUrl) assets.set(asset.key, { asset, url: canonicalUrl });
+      });
+      if (assets.size) data = { ...data, mediaMetadata: [...assets.values()].map(({ asset, url }) => ({ url, mimeType: asset.mimeType, size: asset.size })) };
     }
-    return prisma.post.create({
-      data: { ...data, content: data.content ?? '', imageUrls: data.imageUrls ?? [], authorId },
-      select: postSelect,
+    const post = await prisma.$transaction(async tx => {
+      const created = await tx.post.create({ data: { ...data, content: data.content ?? '', imageUrls: data.imageUrls ?? [], authorId }, select: postSelect });
+      await enqueueSocial(tx, 'post.created', authorId, created.id);
+      return created;
     });
+    await publishActivity();
+    return (await enrichPosts([post], authorId))[0]!;
   },
 
   async getFeed(userId: string, page: number, limit: number) {
-    const following = await prisma.follow.findMany({
-      where: { followerId: userId },
-      select: { followingId: true },
-    });
-
-    const authorIds = [userId, ...following.map((f) => f.followingId)];
+    const where: Prisma.PostWhereInput = { ...visiblePosts(userId), OR: [
+      { authorId: userId }, { author: { followers: { some: { followerId: userId } } } },
+    ] };
 
     const [posts, total] = await Promise.all([
       prisma.post.findMany({
-        where: { authorId: { in: authorIds }, deletedAt: null },
+        where,
         select: postSelect,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * limit,
         take: limit,
       }),
-      prisma.post.count({ where: { authorId: { in: authorIds }, deletedAt: null } }),
+      prisma.post.count({ where }),
     ]);
 
-    // Map to include isLiked and isSaved flags
-    const likedPostIds = await prisma.like.findMany({
-      where: { userId, postId: { in: posts.map((p) => p.id) } },
-      select: { postId: true },
-    });
-
-    const savedPostIds = await prisma.savedPost.findMany({
-      where: { userId, postId: { in: posts.map((p) => p.id) } },
-      select: { postId: true },
-    });
-
-    const likedSet = new Set(likedPostIds.map((l) => l.postId));
-    const savedSet = new Set(savedPostIds.map((s) => s.postId));
-
-    const enriched = posts.map((p) => ({
-      ...p,
-      isLiked: likedSet.has(p.id),
-      isSaved: savedSet.has(p.id),
-    }));
-
-    return { posts: enriched, total };
+    return { posts: await enrichPosts(posts, userId), total };
   },
 
-  async getPost(postId: string) {
+  async getPostEngagement(postId: string, userId: string) {
+    const post = await prisma.post.findFirst({ where: { ...visiblePosts(userId), id: postId },
+      select: { id: true, _count: { select: { likes: true, comments: { where: { deletedAt: null } } } } } });
+    if (!post) throw new NotFoundError('Post');
+    const [like, bookmark] = await Promise.all([
+      prisma.like.findUnique({ where: { userId_postId: { userId, postId } }, select: { postId: true } }),
+      prisma.savedPost.findUnique({ where: { userId_postId: { userId, postId } }, select: { postId: true } }),
+    ]);
+    return { postId, likesCount: post._count.likes, commentsCount: post._count.comments,
+      isLikedByCurrentUser: !!like, isBookmarkedByCurrentUser: !!bookmark };
+  },
+
+  async getPost(postId: string, userId?: string) {
     const post = await prisma.post.findUnique({
-      where: { id: postId, deletedAt: null },
+      where: { ...visiblePosts(userId), id: postId },
       select: {
         ...postSelect,
         comments: {
@@ -92,25 +102,36 @@ export const postService = {
           select: {
             ...commentSelect,
           },
-          orderBy: { createdAt: 'asc' },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
           take: 20,
         },
       },
     });
     if (!post) throw new NotFoundError('Post');
-    return post;
+    return { ...(await enrichPosts([post], userId))[0]!, comments: await enrichComments(post.comments, userId) };
   },
 
   async updatePost(postId: string, userId: string, data: { content?: string; imageUrls?: string[]; videoUrl?: string | null; mediaMetadata?: Prisma.InputJsonValue }) {
     const post = await prisma.post.findUnique({ where: { id: postId } });
     if (!post || post.deletedAt) throw new NotFoundError('Post');
     if (post.authorId !== userId) throw new ForbiddenError();
+    if ((data.imageUrls?.length ?? 0) > 4) throw new ValidationError('A post may contain at most four images');
 
-    return prisma.post.update({
-      where: { id: postId },
-      data,
-      select: postSelect,
-    });
+    const mediaUrls = [
+      ...(data.imageUrls ?? []),
+      ...(typeof data.videoUrl === 'string' ? [data.videoUrl] : []),
+      ...metadataMediaUrls(data.mediaMetadata),
+    ];
+    const normalized = await normalizeSharedMediaReferences(mediaUrls, { ownerId: userId, requireOwnership: true });
+    const replacements = new Map<string, string>();
+    mediaUrls.forEach((url, index) => replacements.set(url, normalized.values[index]!));
+    const updateData: typeof data = { ...data };
+    if (data.imageUrls !== undefined) updateData.imageUrls = data.imageUrls.map(url => replacements.get(url)!);
+    if (typeof data.videoUrl === 'string') updateData.videoUrl = replacements.get(data.videoUrl)!;
+    if (data.mediaMetadata !== undefined) updateData.mediaMetadata = normalizeMetadata(data.mediaMetadata, replacements);
+
+    const updated = await prisma.post.update({ where: { id: postId }, data: updateData, select: postSelect });
+    return (await enrichPosts([updated], userId))[0]!;
   },
 
   async deletePost(postId: string, userId: string) {
@@ -131,24 +152,28 @@ export const postService = {
   async likePost(postId: string, userId: string) {
     await prisma.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR UPDATE`;
-      const post = await tx.post.findFirst({ where: { id: postId, deletedAt: null }, select: { authorId: true } });
+      const post = await tx.post.findFirst({ where: { ...visiblePosts(userId), id: postId }, select: { authorId: true } });
       if (!post) throw new NotFoundError('Post');
+      const existed = await tx.like.findUnique({ where: { userId_postId: { userId, postId } } });
       await tx.like.upsert({ where: { userId_postId: { userId, postId } }, create: { userId, postId }, update: {} });
       await createActivity(tx, { type: 'LIKE', userId: post.authorId, actorId: userId,
         content: 'liked your post', resourceId: postId, dedupeKey: `like:${postId}:${userId}` });
+      if (!existed) await enqueueSocial(tx, 'post.liked', userId, postId);
     });
     await publishActivity();
-    return { message: 'Post liked' };
+    return { message: 'Post liked', ...(await this.getPost(postId, userId)) };
   },
 
   async unlikePost(postId: string, userId: string) {
     await prisma.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR UPDATE`;
-      await tx.like.deleteMany({ where: { userId, postId } });
+      if (!await tx.post.findFirst({ where: { ...visiblePosts(userId), id: postId }, select: { id: true } })) throw new NotFoundError('Post');
+      const removed = await tx.like.deleteMany({ where: { userId, postId } });
+      if (removed.count) await enqueueSocial(tx, 'post.unliked', userId, postId);
       await withdrawActivity(tx, { actorId: userId, type: 'LIKE', OR: [{ postId }, { resourceId: postId }] });
     });
     await publishActivity();
-    return { message: 'Post unliked' };
+    return { message: 'Post unliked', ...(await this.getPost(postId, userId)) };
   },
 
   async addComment(postId: string, authorId: string, content: string, repliedToId?: string | null, clientRequestId?: string) {
@@ -156,7 +181,7 @@ export const postService = {
     if (clientRequestId) z.string().uuid().parse(clientRequestId);
     const comment = await prisma.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR UPDATE`;
-      const post = await tx.post.findFirst({ where: { id: postId, deletedAt: null }, select: { authorId: true } });
+      const post = await tx.post.findFirst({ where: { ...visiblePosts(authorId), id: postId }, select: { authorId: true } });
       if (!post) throw new NotFoundError('Post');
       if (clientRequestId) {
         const existing = await tx.comment.findUnique({ where: { authorId_clientRequestId: { authorId, clientRequestId } }, select: { ...commentSelect, deletedAt: true } });
@@ -175,82 +200,96 @@ export const postService = {
           metadata: { interaction: parent?.authorId === recipient ? 'COMMENT_REPLY' : 'POST_COMMENT', ...(parent ? { repliedToId: repliedToId! } : {}) },
           resourceId: postId, commentId: created.id, dedupeKey: `comment:${created.id}:${recipient}` });
       }
+      await enqueueSocial(tx, 'comment.created', authorId, postId, created.id);
       return created;
     });
     await publishActivity();
-    return comment;
+    return (await enrichComments([comment], authorId))[0]!;
   },
 
-  async getComments(postId: string, requesterId: string, page: number, limit: number) {
-    if (!await prisma.post.findFirst({ where: { id: postId, deletedAt: null }, select: { id: true } })) throw new NotFoundError('Post');
+  async getComments(postId: string, requesterId: string, page: number, limit: number, cursor?: string) {
+    if (!await prisma.post.findFirst({ where: { ...visiblePosts(requesterId), id: postId }, select: { id: true } })) throw new NotFoundError('Post');
+    const after = decodeFeedCursor(cursor);
     const where = { postId, deletedAt: null };
-    const [comments, total] = await Promise.all([
-      prisma.comment.findMany({ where, select: commentSelect, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], skip: (page - 1) * limit, take: limit }),
+    const [rows, total] = await Promise.all([
+      prisma.comment.findMany({ where: { ...where, ...(after ? { OR: [{ createdAt: { gt: new Date(after.at) } }, { createdAt: new Date(after.at), id: { gt: after.id } }] } : {}) },
+        select: commentSelect, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], skip: after ? 0 : (page - 1) * limit, take: limit + 1 }),
       prisma.comment.count({ where }),
     ]);
-    return { comments: comments.map(c => ({ ...c, isMine: c.authorId === requesterId })), total };
+    const more = rows.length > limit, comments = rows.slice(0, limit), last = comments.at(-1);
+    return { comments: (await enrichComments(comments, requesterId)).map(c => ({ ...c, isMine: c.authorId === requesterId })), total,
+      nextCursor: more && last ? encodeFeedCursor(last.createdAt, last.id) : undefined };
+  },
+
+  async commentEngagement(postId: string, commentId: string, userId: string) {
+    const comment = await prisma.comment.findFirst({ where: { id: commentId, postId, deletedAt: null, post: visiblePosts(userId) }, select: commentSelect });
+    if (!comment) throw new NotFoundError('Comment');
+    return (await enrichComments([comment], userId))[0]!;
+  },
+
+  async setCommentLike(postId: string, commentId: string, userId: string, liked: boolean) {
+    const result = await prisma.$transaction(async tx => {
+      // Same lock order as deletion/comment creation; PK/unique is the final duplicate guard.
+      await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR SHARE`;
+      await tx.$queryRaw`SELECT id FROM comments WHERE id=${commentId} AND post_id=${postId} FOR UPDATE`;
+      const comment = await tx.comment.findFirst({ where: { id: commentId, postId, deletedAt: null, post: visiblePosts(userId) }, select: { id: true } });
+      if (!comment) throw new NotFoundError('Comment');
+      const existing = await tx.commentLike.findUnique({ where: { commentId_userId: { commentId, userId } } });
+      if (liked && !existing) await tx.commentLike.create({ data: { commentId, userId } });
+      if (!liked && existing) await tx.commentLike.delete({ where: { id: existing.id } });
+      if (liked !== !!existing) await enqueueSocial(tx, liked ? 'comment.liked' : 'comment.unliked', userId, postId, commentId);
+      const counts = await tx.comment.findUniqueOrThrow({ where: { id: commentId }, select: { _count: { select: { likes: true, replies: { where: { deletedAt: null } } } } } });
+      return { commentId, likesCount: counts._count.likes, repliesCount: counts._count.replies, isLikedByCurrentUser: liked };
+    });
+    await publishActivity(); return result;
   },
 
   async deleteComment(postId: string, commentId: string, userId: string) {
     const result = await prisma.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR UPDATE`;
-      const comment = await tx.comment.findFirst({ where: { id: commentId, postId, post: { deletedAt: null } }, select: { authorId: true, post: { select: { authorId: true } } } });
+      const comment = await tx.comment.findFirst({ where: { id: commentId, postId, post: visiblePosts(userId) }, select: { authorId: true, post: { select: { authorId: true } } } });
       if (!comment) throw new NotFoundError('Comment');
       if (comment.authorId !== userId && comment.post.authorId !== userId) throw new ForbiddenError('Cannot delete this comment');
       await tx.comment.updateMany({ where: { id: commentId, deletedAt: null }, data: { deletedAt: new Date(), deletedBy: userId } });
       await withdrawActivity(tx, { commentId });
+      await enqueueSocial(tx, 'comment.deleted', comment.authorId, postId, commentId);
       return { commentId };
     });
     await publishActivity();
     return result;
   },
 
-  async savePost(postId: string, userId: string) {
-    const post = await prisma.post.findUnique({ where: { id: postId, deletedAt: null } });
-    if (!post) throw new NotFoundError('Post');
-
-    const existing = await prisma.savedPost.findUnique({
-      where: { userId_postId: { userId, postId } },
+  async savePost(postId: string, userId: string) { return this.setSaved(postId, userId, true); },
+  async unsavePost(postId: string, userId: string) { return this.setSaved(postId, userId, false); },
+  async setSaved(postId: string, userId: string, saved: boolean) {
+    await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR SHARE`;
+      if (!await tx.post.findFirst({ where: { ...visiblePosts(userId), id: postId }, select: { id: true } })) throw new NotFoundError('Post');
+      const changed = saved
+        ? await tx.savedPost.createMany({ data: [{ userId, postId }], skipDuplicates: true })
+        : await tx.savedPost.deleteMany({ where: { userId, postId } });
+      if (changed.count) await enqueueSocial(tx, saved ? 'post.bookmarked' : 'post.unbookmarked', userId, postId);
     });
-    if (existing) throw new ConflictError('Post already saved');
-
-    await prisma.savedPost.create({ data: { userId, postId } });
-    return { message: 'Post saved' };
+    await publishActivity();
+    return { message: saved ? 'Post saved' : 'Post unsaved', ...(await this.getPost(postId, userId)) };
   },
 
-  async unsavePost(postId: string, userId: string) {
-    const post = await prisma.post.findUnique({ where: { id: postId, deletedAt: null } });
-    if (!post) throw new NotFoundError('Post');
-
-    await prisma.savedPost.deleteMany({ where: { userId, postId } });
-    return { message: 'Post unsaved' };
-  },
-
-  async getSavedPosts(userId: string, page: number, limit: number) {
-    const [saved, total] = await Promise.all([
-      prisma.savedPost.findMany({
-        where: { userId, post: { deletedAt: null } },
-        orderBy: [{ createdAt: 'desc' }, { postId: 'desc' }],
-        skip: (page - 1) * limit,
-        take: limit,
-        include: {
-          post: {
-            select: {
-              ...postSelect,
-            },
-          },
-        },
-      }),
-      prisma.savedPost.count({ where: { userId, post: { deletedAt: null } } }),
+  async getSavedPosts(userId: string, page: number, limit: number, cursor?: string) {
+    const after = decodeFeedCursor(cursor);
+    const where = { userId, post: visiblePosts(userId) };
+    const [rows, total] = await Promise.all([
+      prisma.savedPost.findMany({ where: { ...where, ...(after ? { OR: [{ createdAt: { lt: new Date(after.at) } }, { createdAt: new Date(after.at), postId: { lt: after.id } }] } : {}) },
+        orderBy: [{ createdAt: 'desc' }, { postId: 'desc' }], skip: after ? 0 : (page - 1) * limit, take: limit + 1, include: { post: { select: postSelect } } }),
+      prisma.savedPost.count({ where }),
     ]);
-
-    return { posts: saved.map((s) => s.post), total };
+    const more = rows.length > limit, saved = rows.slice(0, limit), last = saved.at(-1);
+    return { posts: await enrichPosts(saved.map(s => s.post), userId), total, nextCursor: more && last ? encodeFeedCursor(last.createdAt, last.postId) : undefined };
   },
 
   async getLikedPosts(userId: string, page: number, limit: number) {
     const [liked, total] = await Promise.all([
       prisma.like.findMany({
-        where: { userId, post: { deletedAt: null } },
+        where: { userId, post: visiblePosts(userId) },
         orderBy: [{ createdAt: 'desc' }, { postId: 'desc' }],
         skip: (page - 1) * limit,
         take: limit,
@@ -262,10 +301,10 @@ export const postService = {
           },
         },
       }),
-      prisma.like.count({ where: { userId, post: { deletedAt: null } } }),
+      prisma.like.count({ where: { userId, post: visiblePosts(userId) } }),
     ]);
 
-    return { posts: liked.map((l) => l.post), total };
+    return { posts: await enrichPosts(liked.map(l => l.post), userId), total };
   },
 
   async getStories(userId: string) {
@@ -281,6 +320,7 @@ export const postService = {
         userId: { in: userIds },
         expiresAt: { gt: new Date() },
         deletedAt: null,
+        user: { deletedAt: null, accountStatus: 'ACTIVE', OR: [{ isPrivate: false }, { id: userId }] },
       },
       include: {
         user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
@@ -289,45 +329,41 @@ export const postService = {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
 
-    return stories;
+    const mediaUrls = stories.flatMap(story => [story.mediaUrl, story.user.avatarUrl].filter((url): url is string => !!url));
+    const normalized = await normalizeStoredMediaReferences(mediaUrls);
+    let offset = 0;
+    return stories.map(story => {
+      const mediaUrl = story.mediaUrl ? normalized.values[offset++] ?? null : null;
+      const avatarUrl = story.user.avatarUrl ? normalized.values[offset++] ?? null : null;
+      return { ...story, mediaUrl, user: { ...story.user, avatarUrl } };
+    });
   },
 
   async getUserPosts(username: string, requesterId: string | undefined, page: number, limit: number) {
     const user = await prisma.user.findUnique({
       where: { username },
-      select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, isVerified: true },
+      select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, isVerified: true, isPrivate: true },
     });
     if (!user) throw new NotFoundError('User');
+    const avatar = await normalizeStoredMediaReferences([user.avatarUrl]);
+    const normalizedUser = { ...user, avatarUrl: avatar.values[0] };
 
     const [posts, total] = await Promise.all([
       prisma.post.findMany({
-        where: { authorId: user.id, deletedAt: null },
+        where: { authorId: user.id, ...visiblePosts(requesterId) },
         select: postSelect,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * limit,
         take: limit,
       }),
-      prisma.post.count({ where: { authorId: user.id, deletedAt: null } }),
+      prisma.post.count({ where: { authorId: user.id, ...visiblePosts(requesterId) } }),
     ]);
 
-    const likedPostIds = requesterId
-      ? await prisma.like.findMany({
-          where: { userId: requesterId, postId: { in: posts.map((p) => p.id) } },
-          select: { postId: true },
-        })
-      : [];
-
-    const likedSet = new Set(likedPostIds.map((l) => l.postId));
-
-    const enriched = posts.map((p) => ({
-      ...p,
-      isLiked: likedSet.has(p.id),
-      isSaved: false,
-    }));
+    const enriched = await enrichPosts(posts, requesterId);
 
     return {
       user: {
-        ...user,
+        ...normalizedUser,
         _count: { posts: total },
       },
       posts: enriched,
@@ -336,10 +372,11 @@ export const postService = {
   },
 
   async createStory(userId: string, data: { mediaUrl: string; mediaType: string; caption?: string }) {
+    const normalized = await normalizeSharedMediaReferences([data.mediaUrl], { ownerId: userId, requireOwnership: true });
     const story = await prisma.story.create({
       data: {
         userId,
-        mediaUrl: data.mediaUrl,
+        mediaUrl: normalized.values[0]!,
         mediaType: data.mediaType,
         caption: data.caption ?? null,
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
@@ -350,13 +387,12 @@ export const postService = {
   },
 
   async markStoryViewed(viewerId: string, storyId: string) {
-    const story = await prisma.story.findUnique({
-      where: { id: storyId },
-      select: { userId: true, deletedAt: true },
+    const story = await prisma.story.findFirst({
+      where: { id: storyId, deletedAt: null, expiresAt: { gt: new Date() },
+        user: { deletedAt: null, accountStatus: 'ACTIVE', OR: [{ isPrivate: false }, { id: viewerId }] } },
+      select: { userId: true },
     });
-    if (!story || story.deletedAt) {
-       throw new NotFoundError("Story");
-    }
+    if (!story) throw new NotFoundError('Story');
     await prisma.storyView.upsert({
       where: {
         storyId_viewerId: {
@@ -374,7 +410,7 @@ export const postService = {
 
   async recordPostShare(tx: Prisma.TransactionClient, postId: string, actorId: string) {
     await tx.$queryRaw`SELECT id FROM posts WHERE id=${postId} FOR UPDATE`;
-    const post = await tx.post.findFirst({ where: { id: postId, deletedAt: null }, select: { authorId: true } });
+    const post = await tx.post.findFirst({ where: { ...visiblePosts(), id: postId }, select: { authorId: true } });
     if (!post) throw new NotFoundError('Post');
     await tx.post.update({ where: { id: postId }, data: { shareCount: { increment: 1 } } });
     await createActivity(tx, { type: 'SHARE', userId: post.authorId, actorId,
@@ -383,7 +419,7 @@ export const postService = {
 
   async sharePost(postId: string, userId: string, conversationId: string) {
     const post = await prisma.post.findUnique({
-      where: { id: postId, deletedAt: null },
+      where: { ...visiblePosts(), id: postId },
       select: { id: true, authorId: true, shareCount: true, content: true, imageUrls: true, videoUrl: true },
     });
     if (!post) throw new NotFoundError('Post');
@@ -398,15 +434,16 @@ export const postService = {
         preview: { content: post.content, imageUrls: post.imageUrls, videoUrl: post.videoUrl } },
     }, tx => this.recordPostShare(tx, postId, userId));
 
-    return { postId, shareCount: post.shareCount + 1 };
+    return { postId, shareCount: (await this.getPost(postId, userId)).shareCount };
   },
 
   async shareStory(storyId: string, userId: string, conversationId: string) {
-    const story = await prisma.story.findUnique({
-      where: { id: storyId },
-      select: { id: true, userId: true, expiresAt: true, deletedAt: true },
+    const story = await prisma.story.findFirst({
+      where: { id: storyId, deletedAt: null, expiresAt: { gt: new Date() },
+        user: { deletedAt: null, accountStatus: 'ACTIVE', OR: [{ isPrivate: false }, { id: userId }] } },
+      select: { id: true, userId: true, expiresAt: true },
     });
-    if (!story || story.deletedAt) throw new NotFoundError('Story');
+    if (!story) throw new NotFoundError('Story');
 
     if (story.userId === userId) {
       throw new ForbiddenError('Cannot share your own story');
@@ -421,7 +458,7 @@ export const postService = {
 
   async reportPost(postId: string, reporterId: string, reason: string, details?: string | null) {
     const post = await prisma.post.findUnique({
-      where: { id: postId, deletedAt: null },
+      where: { ...visiblePosts(reporterId), id: postId },
       select: { id: true, authorId: true },
     });
     if (!post) throw new NotFoundError('Post');
@@ -459,7 +496,7 @@ export const postService = {
 
   async sharePostToUser(postId: string, senderId: string, targetUsername: string) {
     const post = await prisma.post.findUnique({
-      where: { id: postId, deletedAt: null },
+      where: { ...visiblePosts(), id: postId },
       select: { id: true, authorId: true, shareCount: true, content: true, imageUrls: true, videoUrl: true },
     });
     if (!post) throw new NotFoundError('Post');
@@ -481,6 +518,6 @@ export const postService = {
         preview: { content: post.content, imageUrls: post.imageUrls, videoUrl: post.videoUrl } },
     }, tx => this.recordPostShare(tx, postId, senderId));
 
-    return { postId, shareCount: post.shareCount + 1, conversationId: conversation.id };
+    return { postId, shareCount: (await this.getPost(postId, senderId)).shareCount, conversationId: conversation.id };
   },
 };

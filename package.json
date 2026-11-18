@@ -17,7 +17,8 @@
     "admin:dev": "npm --prefix admin install && npm --prefix admin run dev",
     "admin:build": "npm --prefix admin ci && npm --prefix admin run build",
     "test": "node --test test/*.test.mjs",
-    "db:validate:wasm": "node scripts/validate-schema.cjs"
+    "db:validate:wasm": "node scripts/validate-schema.cjs",
+    "db:backfill:media-urls": "tsx scripts/backfill-media-urls.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.8.2",
@@ -28,6 +29,7 @@
     "express": "^5.1.0",
     "express-rate-limit": "^7.5.0",
     "express-validator": "^7.2.1",
+    "google-auth-library": "^10.9.1",
     "helmet": "^8.1.0",
     "ioredis": "^5.6.1",
     "jsonwebtoken": "^9.0.2",
@@ -39,7 +41,7 @@
     "uuid": "^11.1.0",
     "winston": "^3.17.0",
     "winston-daily-rotate-file": "^5.0.0",
-    "zod": "^3.24.4"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.13",

@@ -79,6 +79,17 @@ const fileFilter = (_req: Request, file: Express.Multer.File, cb: FileFilterCall
   }
 };
 
+// Avatar uploads get their own staging storage. The client MIME and filename are
+// only used to admit image/* parts; media.service decodes the bytes and writes a
+// normalized WebP before the file is ever registered or served.
+const AVATAR_MIME = /^image\/[a-z0-9][a-z0-9.+-]*$/i;
+const avatarStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, path.join(UPLOADS_ROOT, MEDIA_TYPES.image.folder));
+  },
+  filename: (_req, _file, cb) => cb(null, `${uuidv4()}.upload`),
+});
+
 // ─── Multer instances ─────────────────────────────────────────────
 
 // Single file (any type) — for message attachments
@@ -101,14 +112,15 @@ export const uploadImages = multer({
   limits: { fields: 10, fieldSize: 4096, parts: 16, fileSize: MEDIA_TYPES.image.maxSize, files: 4 },
 }).array('images', 4);
 
-// Avatar — single image only
+// Avatar — image/* only. The extension/format is intentionally not inferred here;
+// processing verifies the payload and stores a normalized WebP instead.
 export const uploadAvatar = multer({
-  storage,
+  storage: avatarStorage,
   fileFilter: (_req, file, cb) => {
-    if ((MEDIA_TYPES.image.mimes as readonly string[]).includes(file.mimetype)) {
+    if (AVATAR_MIME.test(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new AppError('Only images are allowed for avatars', 400));
+      cb(new AppError('Only image files are allowed for avatars', 415));
     }
   },
   limits: { fields: 10, fieldSize: 4096, parts: 16, fileSize: 5 * 1024 * 1024, files: 1 },

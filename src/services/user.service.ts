@@ -1,6 +1,12 @@
 import { createActivity, publishActivity, withdrawActivity } from './activity.service.js';
 import { prisma } from '../config/database.js';
-import { NotFoundError, ConflictError } from '../utils/errors.js';
+import { NotFoundError, ConflictError, ForbiddenError } from '../utils/errors.js';
+import { normalizeSharedMediaReferences, normalizeStoredMediaReferences } from './media-url.service.js';
+
+async function normalizeAvatarUsers<T extends { avatarUrl: string | null }>(users: T[]): Promise<T[]> {
+  const avatars = await normalizeStoredMediaReferences(users.map(user => user.avatarUrl));
+  return users.map((user, index) => ({ ...user, avatarUrl: avatars.values[index] ?? null }));
+}
 
 export const userService = {
   async getProfile(username: string, requesterId?: string) {
@@ -13,8 +19,9 @@ export const userService = {
         bio: true,
         avatarUrl: true,
         isVerified: true,
+        isPrivate: true,
         createdAt: true,
-        _count: { select: { followers: true, following: true, posts: true } },
+        _count: { select: { followers: true, following: true, posts: { where: { deletedAt: null } } } },
       },
     });
     if (!user) throw new NotFoundError('User');
@@ -27,7 +34,8 @@ export const userService = {
       isFollowing = !!follow;
     }
 
-    return { ...user, isFollowing };
+    const [normalizedUser] = await normalizeAvatarUsers([user]);
+    return { ...normalizedUser!, isFollowing };
   },
 
   async searchUsers(query: string, requesterId?: string) {
@@ -47,7 +55,7 @@ export const userService = {
         bio: true,
         avatarUrl: true,
         isVerified: true,
-        _count: { select: { followers: true, following: true, posts: true } },
+        _count: { select: { followers: true, following: true, posts: { where: { deletedAt: null } } } },
       },
       take: 20,
     });
@@ -65,12 +73,12 @@ export const userService = {
       }),
     );
 
-    return enriched;
+    return normalizeAvatarUsers(enriched);
   },
 
   async updateProfile(
     userId: string,
-    data: { displayName?: string; username?: string; bio?: string; avatarUrl?: string }
+    data: { displayName?: string; username?: string; bio?: string; avatarUrl?: string; isPrivate?: boolean }
   ) {
     if (data.username) {
       const existing = await prisma.user.findUnique({
@@ -82,17 +90,23 @@ export const userService = {
       }
     }
 
-    return prisma.user.update({
-      where: { id: userId },
-      data,
-      select: { id: true, username: true, displayName: true, bio: true, avatarUrl: true },
+    if (data.avatarUrl !== undefined) {
+      const normalized = await normalizeSharedMediaReferences([data.avatarUrl], { ownerId: userId, requireOwnership: true });
+      data = { ...data, avatarUrl: normalized.values[0]! };
+    }
+    const updated = await prisma.user.update({
+      where: { id: userId }, data,
+      select: { id: true, username: true, displayName: true, bio: true, avatarUrl: true, isPrivate: true },
     });
+    const [normalizedUser] = await normalizeAvatarUsers([updated]);
+    return normalizedUser!;
   },
 
   async follow(followerId: string, targetUsername: string) {
     const target = await prisma.user.findUnique({ where: { username: targetUsername } });
     if (!target) throw new NotFoundError('User');
     if (target.id === followerId) throw new ConflictError('Cannot follow yourself');
+    if (target.isPrivate) throw new ForbiddenError('Private accounts do not accept follows until follow requests are supported');
 
     await prisma.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM users WHERE id=${target.id} FOR UPDATE`;
@@ -137,7 +151,7 @@ export const userService = {
       prisma.follow.count({ where: { followingId: user.id } }),
     ]);
 
-    return { followers: followers.map((f) => f.follower), total };
+    return { followers: await normalizeAvatarUsers(followers.map((f) => f.follower)), total };
   },
 
   async getFollowing(username: string, page: number, limit: number) {
@@ -157,7 +171,7 @@ export const userService = {
       prisma.follow.count({ where: { followerId: user.id } }),
     ]);
 
-    return { following: following.map((f) => f.following), total };
+    return { following: await normalizeAvatarUsers(following.map((f) => f.following)), total };
   },
 
   async getMyFollowing(userId: string, page: number, limit: number) {
@@ -174,7 +188,7 @@ export const userService = {
       prisma.follow.count({ where: { followerId: userId } }),
     ]);
 
-    return { following: following.map((f) => f.following), total };
+    return { following: await normalizeAvatarUsers(following.map((f) => f.following)), total };
   },
 
   async getSuggestedUsers(userId: string, page: number, limit: number) {
@@ -202,6 +216,6 @@ export const userService = {
       }),
     ]);
 
-    return { users, total };
+    return { users: await normalizeAvatarUsers(users), total };
   },
 };

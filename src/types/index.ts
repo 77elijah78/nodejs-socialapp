@@ -142,6 +142,7 @@ export interface Message {
   deletedAt: Date | null;
   deletedBy: string | null;
   duration: number | null;
+  pinned: boolean;
   repliedToId: string | null;
   repliedTo?: Message | null;
   replies?: Message[];

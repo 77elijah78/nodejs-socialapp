@@ -35,7 +35,7 @@ export const postController = {
     try {
       const postId =
         typeof req.params.id === "string" ? req.params.id : req.params.id[0];
-      const post = await postService.getPost(postId);
+      const post = await postService.getPost(postId, (req as AuthRequest).user?.userId);
       sendSuccess(res, post);
     } catch (err) {
       next(err);
@@ -141,8 +141,8 @@ export const postController = {
     try {
       const { userId } = (req as AuthRequest).user;
       const { page, limit } = parsePagination(req.query);
-      const { posts, total } = await postService.getSavedPosts(userId, page, limit);
-      sendSuccess(res, posts, "Saved posts", 200, buildPaginationMeta(total, page, limit));
+      const { posts, total, nextCursor } = await postService.getSavedPosts(userId, page, limit, typeof req.query.cursor === "string" ? req.query.cursor : undefined);
+      sendSuccess(res, posts, "Saved posts", 200, buildPaginationMeta(total, page, limit, nextCursor));
     } catch (err) {
       next(err);
     }
