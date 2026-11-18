@@ -22,10 +22,9 @@ tests. Do the deployment/device gates below before inviting real users.
    apply. The registry supplies the stored MIME on reads.
 3. Static uploads were public, including private messages. Reads now authorize
    against owning uploader or current live post/avatar/story/message references.
-4. Optional sharp was not a dependency, thumbnail MIME/extension could disagree,
-   and optional WebP rewriting changed primary URL without corresponding file
-   metadata. Sharp is now installed; the original stays the primary URL, and a
-   registered JPEG thumbnail uses a .jpg filename and source reference.
+4. Sharp is required. Generic media uploads keep the validated original as their
+   primary URL and register a correctly named JPEG thumbnail; the avatar route has
+   a separate decoder/normalizer and stores only a metadata-stripped WebP output.
 5. Post create required text even for media posts and did not default image arrays.
    Media-only posts now work. Upload-backed metadata is populated when omitted;
    the same mediaMetadata/imageUrls/videoUrl selection is used in create, feed,
@@ -50,9 +49,13 @@ sourceUrl for thumbnails). A media URL is stable, not a temporary signed URL.
 - PUBLIC_MEDIA_BASE_URL=https://api.example.com/uploads (no trailing slash required).
 - UPLOADS_PATH=/app/uploads (Compose default).
 - BASE_URL is a backwards-compatible origin fallback; prefer the explicit variable.
+- PUBLIC_MEDIA_BASE_URL (or BASE_URL) is now required: there is no implicit
+  localhost default. A missing or non-public value fails fast instead of minting
+  URLs no device can reach.
 - JWT_SECRET must be 32+ characters and not a known placeholder in production.
 - Set POSTGRES_PASSWORD, CORS_ORIGIN, DATABASE_URL and broker/Redis variables normally.
-- Keep the public media base stable. Changing it does **not** rewrite legacy URLs.
+- Keep the public media base stable. Changing it does **not** rewrite legacy URLs by
+  itself: run the backfill (below) after any origin change.
 
 Access policy:
 - Published posts and active users' avatars remain public, consistent with public
@@ -81,6 +84,30 @@ limits. Multipart fields/parts are bounded. Image 10MiB, audio 20MiB, video 200M
 avatars 5MiB. Oversized mixed uploads are rejected after bounded disk storage;
 Multer's outer 200MiB cap still applies while streaming.
 
+Avatar-specific contract:
+- Only `/media/upload/avatar` accepts a declared `image/*` MIME. The shared MIME
+  allowlist for chat (`/media/upload`) and posts (`/media/upload/images`) is unchanged.
+- The avatar route stages the upload as a temporary `.upload` file, then required
+  Sharp decoding verifies the payload (the client MIME/filename is not trusted).
+  It applies EXIF orientation, rejects inputs over 40 megapixels, uses the first
+  frame, resizes within 1024×1024, strips metadata by re-encoding to WebP, and
+  stores only the normalized `.webp` plus an optional 400px WebP thumbnail. The
+  staged original is removed on success and failure. Response `url`, `width`, and
+  `height` describe the normalized WebP; thumbnailUrl is optional.
+- Error responses: 400 for a missing `avatar` part, 413 for an input over 5 MiB,
+  and 415 for a non-image declared MIME or bytes that cannot be decoded by Sharp.
+  Unsupported decoder formats return 415; the server never stores/serves the
+  unverifiable original.
+- SVG is deliberately rejected with 415 before vector decoding. It is untrusted
+  XML that may reference external resources; upload a raster image instead.
+- Format support is determined by the deployed Sharp/libvips build. In the Linux
+  x64 build tested here (Sharp 0.35.5, libvips 8.18.7), JPEG, PNG, GIF, WebP, TIFF,
+  and AVIF were available for raster conversion. The prebuilt image loader did not
+  expose BMP, HEIC/HEIF, JPEG XL, or camera RAW decoders; those formats receive a
+  truthful 415 on that build. Verify codec support against the actual deployment
+  image before promising additional formats; MIME acceptance alone does not
+  enable a missing decoder.
+
 The existing success envelope data contains `url`, `category`, `mimeType`, `size`,
 `filename`, plus `fileName`, `fileMimeType`, `fileSize` aliases for messages. Images
 also return dimensions and thumbnailUrl. Single uploads accept optional multipart
@@ -88,6 +115,64 @@ also return dimensions and thumbnailUrl. Single uploads accept optional multipar
 Persist upload `url` as message `mediaUrl`, not file://, content://, or the device's
 picker URI. Persist thumbnailUrl/duration/type and file metadata. The message
 service fills MIME/size/thumbnail from its registry when the attachment is known.
+
+## Canonical owned-media URLs (client origins do not matter)
+Every owned upload URL is stored and returned against this deployment's
+PUBLIC_MEDIA_BASE_URL. A client may hand back the URL it received, or an older
+copy of it whose origin differs (reverse proxy, `http` vs `https`, LAN address,
+old port); the server rewrites it to
+`${PUBLIC_MEDIA_BASE_URL}/<images|videos|audio>/<filename>`.
+
+- The rewrite happens on write for `PATCH /users/me` `avatarUrl`, post
+  `imageUrls`/`videoUrl`/`mediaMetadata[].url`/`.thumbnailUrl`, story `mediaUrl`,
+  message `mediaUrl`/`thumbnailUrl`, sticker pack `mediaUrl` entries, and
+  group/channel `avatarUrl`. It only applies when the URL's key matches a
+  `MediaAsset` this deployment registered; genuinely external CDN URLs (including
+  signed ones with query strings) are stored untouched.
+- Public publications (`avatarUrl`, post media, story media, sticker packs,
+  group/channel avatars) must reference files uploaded by the acting account;
+  reusing another account's upload key returns 400. Messages (including forwards)
+  keep accepting a referenced upload, but still only canonicalize the sender's own
+  assets; reading them remains gated by conversation membership. This keeps
+  "publish someone else's upload" from being a privacy bypass. Files are never
+  stored under a client-supplied origin.
+- Stored values are canonicalized again when serialized, so a legacy row can never
+  leak an old owned origin through `GET /users/:username`, `/users/search`,
+  follower/following lists, post feeds/detail/saved/liked/explore/activity
+  previews, comments, stories, conversation participants, notification actors,
+  channel contracts, or group/channel payloads.
+- `GET /uploads/<key>` authorizes using the canonical URL plus the known
+  `MediaAsset` URLs/`sourceUrl` — never by trusting the origin in a stored string.
+  Authorization still requires a public post, an active user avatar, an active
+  story, an accessible sticker pack, the uploader, or an accessible conversation
+  message. An unreferenced upload stays 403.
+- No profile/participant/activity response is cached server-side, so a new avatar
+  is visible on the next request in every response listed above.
+- Backfill existing rows once (idempotent; `--dry-run` prints the count):
+  `npm run db:backfill:media-urls -- --dry-run` then
+  `npm run db:backfill:media-urls`. It rewrites `User.avatarUrl`, `Post.imageUrls`,
+  `Post.videoUrl`, `Post.mediaMetadata`, `Conversation.groupAvatar` and
+  `Story.mediaUrl` values whose path matches `/uploads/<images|videos|audio>/<safe
+  filename>`, and leaves external URLs unchanged.
+
+Shared-URL validation (used by profile, post, story, message, group and channel
+payloads) rejects URLs with credentials, encoded or literal `..`/`\` segments,
+whitespace/control characters, non-HTTP(S) schemes, `localhost`/`.local`/internal-only
+names, and loopback/link-local/unspecified/multicast IP literals in every
+environment. In production (`NODE_ENV=production`) the media origin must be `https`
+and the host must be a public unicast address/name; RFC1918, CGNAT, ULA and
+documentation ranges are denied. Outside production those LAN ranges are accepted
+so a physical device can reach `http://192.168.x.x:3000/uploads` during
+development — that relaxation is what the dev Compose files rely on.
+
+## Post media and profile counts
+- `imageUrls` remains an array of up to four canonical
+  `.../uploads/images/<file>` URLs in home, explore, saved, liked and author feeds.
+  `mediaMetadata` is complementary; clients should use `imageUrls` first. Image-only
+  posts (`content: ''` plus non-empty `imageUrls`) are accepted and returned.
+- `_count.posts` on `GET /users/:username`, `GET /users/search` and the admin user
+  views now excludes soft-deleted posts, matching the `deletedAt: null` filter used
+  by every feed. The author feed's `total`/`user._count.posts` remain the live count.
 
 Post creation retains imageUrls[] and videoUrl; `content` may be empty when media
 is provided. Optional `mediaMetadata` is an array of `{url, mimeType, size,

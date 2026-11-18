@@ -1,3 +1,4 @@
+import type { SocialEvent } from '../services/social-interaction.service.js';
 import { Producer, CompressionTypes } from 'kafkajs';
 import { kafka, TopicName } from '../config/kafka.js';
 import { logger } from '../config/logger.js';
@@ -114,6 +115,7 @@ export interface MessageEditedEvent {
   messageId: string;
   content: string;
   editedAt: string;
+  pinned?: boolean;
 }
 
 export interface MessageDeletedEvent {
@@ -135,7 +137,27 @@ export interface ConversationDeletedEvent {
   deletedAt: string;
 }
 
+export interface ConversationMembershipEvent {
+  eventId: string;
+  conversationId: string;
+  kind: 'GROUP' | 'CHANNEL';
+  action: string;
+  actorId: string;
+  memberIds: string[];
+  occurredAt: string;
+}
+
+export interface StickerPackChangedEvent {
+  eventId: string;
+  action: string;
+  actorId: string;
+  packId?: string;
+  stickerId?: string;
+  isPublic?: boolean;
+}
+
 export const kafkaEvents = {
+  socialInteraction: (event: SocialEvent) => publishEvent(TOPICS.SOCIAL_INTERACTIONS, event, event.postId),
   chatMessage: (event: ChatMessageEvent) =>
     publishEvent(TOPICS.CHAT_MESSAGES, event, event.conversationId),
 
@@ -168,4 +190,10 @@ export const kafkaEvents = {
 
    conversationDeleted: (event: ConversationDeletedEvent) =>
     publishEvent(TOPICS.CONVERSATION_DELETED, event, event.conversationId),
+
+  conversationMembership: (event: ConversationMembershipEvent) =>
+    publishEvent(TOPICS.CHAT_MEMBERSHIP, event, event.conversationId),
+
+  stickerPackChanged: (event: StickerPackChangedEvent) =>
+    publishEvent(TOPICS.STICKERS, event, event.actorId),
 };

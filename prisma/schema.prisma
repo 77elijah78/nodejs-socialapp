@@ -41,6 +41,22 @@ enum MessageType {
   DOCUMENT
   SHARED_POST
   SHARED_STORY
+  STICKER
+}
+
+enum ConversationKind {
+  DIRECT
+  GROUP
+  CHANNEL
+}
+
+enum ConversationRole {
+  MEMBER
+  ADMIN
+}
+
+enum IdentityProvider {
+  GOOGLE
 }
 
 enum MessageStatus {
@@ -127,8 +143,19 @@ model NotificationReplyAction {
 }
 
 model User {
+  isPrivate Boolean @default(false) @map("is_private")
+  commentLikes CommentLike[]
+  exploreSessions ExploreSession[]
+  exploreSeen ExploreSeen[]
+  postInterests PostInterest[]
   notificationReplyActions NotificationReplyAction[]
   pushDevices PushDevice[]
+  googleIdentities GoogleIdentity[]
+  ownedConversations Conversation[] @relation("ConversationOwner")
+  stickerPacks StickerPack[]
+  stickerPackInstalls StickerPackInstall[]
+  stickerFavorites StickerFavorite[]
+  stickerRecents StickerRecent[]
   messagePushEnabled Boolean @default(true) @map("message_push_enabled")
   pushPreviewsEnabled Boolean @default(false) @map("push_previews_enabled")
   id              String        @id @default(uuid())
@@ -182,6 +209,7 @@ model User {
 
   @@index([avatarUrl])
   @@index([accountStatus])
+  @@index([accountStatus, isPrivate], map: "users_status_private_idx")
   @@index([createdAt])
   @@index([lastActiveAt])
   @@map("users")
@@ -200,9 +228,25 @@ model MediaAsset {
   mimeType String @map("mime_type")
   size Int
   createdAt DateTime @default(now()) @map("created_at")
+  stickers Sticker[]
   @@index([sourceUrl])
   @@index([ownerId, createdAt])
   @@map("media_assets")
+}
+
+model GoogleIdentity {
+  id String @id @default(uuid())
+  provider IdentityProvider @default(GOOGLE)
+  providerSubject String @map("provider_subject")
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email String?
+  emailVerifiedAt DateTime? @map("email_verified_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@unique([provider, providerSubject], map: "google_identities_provider_subject_key")
+  @@unique([provider, userId], map: "google_identities_provider_user_key")
+  @@index([userId])
+  @@map("google_identities")
 }
 
 model RefreshToken {
@@ -236,6 +280,8 @@ model Follow {
 // POSTS
 // ─────────────────────────────────────────────────────────────
 model Post {
+  interests PostInterest[]
+  seen ExploreSeen[]
   mediaMetadata Json? @map("media_metadata")
   activities Notification[]
   id         String    @id @default(uuid())
@@ -273,10 +319,12 @@ model Like {
   @@id([userId, postId])
   @@index([postId])
   @@index([createdAt])
+  @@index([userId, createdAt(sort: Desc), postId], map: "likes_user_recent_idx")
   @@map("likes")
 }
 
 model Comment {
+  likes CommentLike[]
   parent Comment? @relation("CommentReplies", fields: [repliedToId], references: [id], onDelete: SetNull)
   replies Comment[] @relation("CommentReplies")
   notifications Notification[]
@@ -298,6 +346,7 @@ model Comment {
   @@index([authorId])
   @@index([createdAt])
   @@index([deletedAt])
+  @@index([authorId, createdAt(sort: Desc), id], map: "comments_author_recent_idx")
   @@map("comments")
 }
 
@@ -312,6 +361,7 @@ model SavedPost {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@id([userId, postId])
+  @@index([userId, createdAt(sort: Desc), postId(sort: Desc)], map: "saved_posts_user_cursor_idx")
   @@map("saved_posts")
 }
 
@@ -361,17 +411,26 @@ model ReportNote {
 // MESSAGING
 // ─────────────────────────────────────────────────────────────
 model Conversation {
-  id          String   @id @default(uuid())
-  isGroup     Boolean  @default(false) @map("is_group")
-  groupName   String?  @map("group_name")
-  groupAvatar String?  @map("group_avatar")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id              String           @id @default(uuid())
+  isGroup         Boolean          @default(false) @map("is_group")
+  kind            ConversationKind @default(DIRECT)
+  groupName       String?          @map("group_name")
+  groupAvatar     String?          @map("group_avatar")
+  description     String?
+  ownerId         String?          @map("owner_id")
+  owner           User?            @relation("ConversationOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  isPublic        Boolean          @default(false) @map("is_public")
+  slug            String?          @unique
+  inviteTokenHash String?          @unique @map("invite_token_hash")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
 
   participants ConversationParticipant[]
   messages     Message[]
 
   @@index([updatedAt])
+  @@index([kind, isPublic, createdAt, id])
+  @@index([ownerId])
   @@map("conversations")
 }
 
@@ -380,13 +439,82 @@ model ConversationParticipant {
   userId         String       @map("user_id")
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  joinedAt       DateTime     @default(now()) @map("joined_at")
-  lastReadAt     DateTime?    @map("last_read_at")
+  joinedAt       DateTime         @default(now()) @map("joined_at")
+  role           ConversationRole @default(MEMBER)
+  lastReadAt     DateTime?        @map("last_read_at")
   deletedAt      DateTime?    @map("deleted_at")
 
   @@id([conversationId, userId])
   @@index([userId])
   @@map("conversation_participants")
+}
+
+model StickerPack {
+  id          String                @id @default(uuid())
+  ownerId     String?               @map("owner_id")
+  owner       User?                 @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  shortName   String                @map("short_name")
+  title       String
+  description String?
+  isPublic    Boolean               @default(false) @map("is_public")
+  createdAt   DateTime              @default(now()) @map("created_at")
+  updatedAt   DateTime              @updatedAt @map("updated_at")
+  stickers    Sticker[]
+  installs    StickerPackInstall[]
+  @@unique([ownerId, shortName], map: "sticker_packs_owner_short_name_key")
+  @@index([isPublic, createdAt, id], map: "sticker_packs_public_cursor_idx")
+  @@index([ownerId, createdAt, id], map: "sticker_packs_owner_cursor_idx")
+  @@map("sticker_packs")
+}
+
+model Sticker {
+  id           String          @id @default(uuid())
+  packId       String          @map("pack_id")
+  pack         StickerPack     @relation(fields: [packId], references: [id], onDelete: Cascade)
+  mediaAssetId String          @unique @map("media_asset_id")
+  asset        MediaAsset      @relation(fields: [mediaAssetId], references: [id], onDelete: Restrict)
+  emoji        String?
+  position     Int
+  createdAt    DateTime        @default(now()) @map("created_at")
+  messages     Message[]
+  favorites    StickerFavorite[]
+  recents      StickerRecent[]
+  @@unique([packId, position], map: "stickers_pack_position_key")
+  @@index([packId, createdAt, id])
+  @@map("stickers")
+}
+
+model StickerPackInstall {
+  userId      String      @map("user_id")
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  packId      String      @map("pack_id")
+  pack        StickerPack @relation(fields: [packId], references: [id], onDelete: Cascade)
+  installedAt DateTime    @default(now()) @map("installed_at")
+  @@id([userId, packId])
+  @@index([userId, installedAt, packId])
+  @@map("sticker_pack_installs")
+}
+
+model StickerFavorite {
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stickerId String   @map("sticker_id")
+  sticker   Sticker  @relation(fields: [stickerId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+  @@id([userId, stickerId])
+  @@index([userId, createdAt, stickerId])
+  @@map("sticker_favorites")
+}
+
+model StickerRecent {
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stickerId String   @map("sticker_id")
+  sticker   Sticker  @relation(fields: [stickerId], references: [id], onDelete: Cascade)
+  usedAt    DateTime @default(now()) @map("used_at")
+  @@id([userId, stickerId])
+  @@index([userId, usedAt, stickerId])
+  @@map("sticker_recents")
 }
 
 model MessageReceipt {
@@ -429,7 +557,10 @@ model Message {
   fileName String? @map("file_name")
   fileMimeType String? @map("file_mime_type")
   fileSize Int? @map("file_size")
+  pinned Boolean @default(false) @map("pinned")
   sharedReference Json? @map("shared_reference")
+  stickerId       String?       @map("sticker_id")
+  sticker         Sticker?      @relation(fields: [stickerId], references: [id], onDelete: SetNull)
   receipts MessageReceipt[]
   id              String        @id @default(uuid())
   content         String
@@ -469,6 +600,7 @@ model Message {
   @@index([type])
   @@index([repliedToId])
   @@index([forwardedFromId])
+  @@index([stickerId])
   @@map("messages")
 }
 
@@ -597,4 +729,54 @@ model PlatformSetting {
 
   @@index([category])
   @@map("platform_settings")
+}
+
+
+model CommentLike {
+  id String @id @default(uuid())
+  commentId String @map("comment_id")
+  userId String @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([commentId, userId])
+  @@index([userId, createdAt], map: "comment_likes_user_created_idx")
+  @@map("comment_likes")
+}
+
+model ExploreSession {
+  id String @id @default(uuid())
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postIds String[] @map("post_ids")
+  expiresAt DateTime @map("expires_at")
+  @@index([userId, expiresAt], map: "explore_sessions_user_expiry_idx")
+  @@index([expiresAt], map: "explore_sessions_expiry_idx")
+  @@map("explore_sessions")
+}
+
+model ExploreSeen {
+  sessionId String @map("session_id")
+  userId String @map("user_id")
+  postId String @map("post_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  seenAt DateTime @default(now()) @map("seen_at")
+  @@id([userId, postId])
+  @@index([userId, seenAt], map: "explore_seen_user_seen_idx")
+  @@index([seenAt], map: "explore_seen_seen_idx")
+  @@map("explore_seen")
+}
+
+// Recomputed from canonical interaction rows, never incremented from Kafka deltas.
+model PostInterest {
+  userId String @map("user_id")
+  postId String @map("post_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  weight Int
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@id([userId, postId])
+  @@index([userId, updatedAt], map: "post_interests_user_updated_idx")
+  @@map("post_interests")
 }

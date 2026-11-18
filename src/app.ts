@@ -16,6 +16,9 @@ import { ensureUploadDirs } from './middlewares/upload.js';
 import { maintenanceModeGuard } from './middlewares/maintenance.js';
 
 const app = express();
+const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS ?? 0);
+if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0 || trustProxyHops > 10) throw new Error('TRUST_PROXY_HOPS must be an integer from 0 to 10');
+if (trustProxyHops > 0) app.set('trust proxy', trustProxyHops);
 
 // ─── Ensure upload dirs exist on startup ──────────────────────────
 mediaBaseUrl();

@@ -1,3 +1,4 @@
+import { processSocialInteraction } from '../services/social-interaction.service.js';
 import { emitMessageOnce } from '../services/delivery-state.service.js';
 import { activityService } from '../services/activity.service.js';
 import { messageInclude, serializeMessage } from '../services/message.dto.js';
@@ -17,6 +18,8 @@ import type {
   MessageDeletedEvent,
   MessageDeletedForMeEvent,
   ConversationDeletedEvent,
+  ConversationMembershipEvent,
+  StickerPackChangedEvent,
 } from './producer.js';
 
 let consumer: Consumer;
@@ -68,6 +71,9 @@ export async function disconnectConsumer(): Promise<void> {
 
 export async function routeEvent(io: Server, topic: string, payload: unknown): Promise<void> {
   switch (topic) {
+    case TOPICS.SOCIAL_INTERACTIONS:
+      await processSocialInteraction(payload);
+      break;
     case TOPICS.CHAT_MESSAGES:
       await handleChatMessage(io, payload as ChatMessageEvent);
       break;
@@ -102,6 +108,14 @@ export async function routeEvent(io: Server, topic: string, payload: unknown): P
 
     case TOPICS.CONVERSATION_DELETED:
       handleConversationDeleted(io, payload as ConversationDeletedEvent);
+      break;
+
+    case TOPICS.CHAT_MEMBERSHIP:
+      await handleConversationMembership(io, payload as ConversationMembershipEvent);
+      break;
+
+    case TOPICS.STICKERS:
+      handleStickerPackChanged(io, payload as StickerPackChangedEvent);
       break;
 
     default:
@@ -151,6 +165,7 @@ function handleMessageEdited(io: Server, event: MessageEditedEvent): void {
     conversationId: event.conversationId,
     content: event.content,
     editedAt: event.editedAt,
+    ...(event.pinned !== undefined ? { pinned: event.pinned } : {}),
   });
 
   logger.debug(
@@ -241,6 +256,26 @@ export function handleMessageRead(io: Server, event: MessageReadEvent): void {
     messageId: receipt.messageId,
     readAt: receipt.readAt,
   });
+}
+
+async function handleConversationMembership(io: Server, raw: ConversationMembershipEvent): Promise<void> {
+  const event = z.object({ eventId: z.string().uuid(), conversationId: z.string().uuid(), kind: z.enum(['GROUP', 'CHANNEL']),
+    action: z.string().min(1).max(40), actorId: z.string().uuid(), memberIds: z.array(z.string().uuid()).max(1000),
+    occurredAt: z.string().datetime() }).strict().parse(raw);
+  const room = `conversation:${event.conversationId}`;
+  const userRooms = [...new Set(event.memberIds)].map(id => `user:${id}`);
+  const eventName = event.kind === 'CHANNEL' ? 'channel:membership' : 'group:membership';
+  if (event.action === 'member-removed') {
+    for (const userRoom of userRooms) await io.in(userRoom).socketsLeave(room);
+  }
+  io.to(room).emit(eventName, event);
+  if (userRooms.length) io.to(userRooms).emit(eventName, event);
+}
+
+function handleStickerPackChanged(io: Server, raw: StickerPackChangedEvent): void {
+  const event = z.object({ eventId: z.string().uuid(), action: z.string().min(1).max(40), actorId: z.string().uuid(),
+    packId: z.string().uuid().optional(), stickerId: z.string().uuid().optional(), isPublic: z.boolean().optional() }).strict().parse(raw);
+  io.to(`user:${event.actorId}`).emit('stickers:pack-changed', event);
 }
 
 function handleConversationDeleted(io: Server, event: ConversationDeletedEvent): void {

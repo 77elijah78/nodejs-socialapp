@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import { z } from 'zod';
 import { AuthRequest } from '../types/index.js';
 import { Request, Response, NextFunction } from 'express';
-import { processUploadedFile, processUploadedFiles } from '../services/media.service.js';
+import { processAvatarFile, processUploadedFile, processUploadedFiles } from '../services/media.service.js';
 import { sendSuccess } from '../utils/response.js';
 import { AppError } from '../utils/errors.js';
 
@@ -48,7 +48,7 @@ export const mediaController = {
     try {
       if (!req.file) throw new AppError('No image provided', 400);
 
-      const media = await processUploadedFile(req.file, (req as AuthRequest).user.userId);
+      const media = await processAvatarFile(req.file, (req as AuthRequest).user.userId);
 
       sendSuccess(res, {
         url: media.url,

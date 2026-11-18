@@ -23,6 +23,10 @@ export const refreshSchema = z.object({
   body: z.object({ refreshToken: z.string().min(1) }),
 });
 
+export const googleTokenSchema = z.object({
+  body: z.object({ idToken: z.string().min(10).max(8192) }).strict(),
+});
+
 // ─── Users ─────────────────────────────────────────────────
 export const updateProfileSchema = z.object({
   body: z.object({
@@ -30,6 +34,7 @@ export const updateProfileSchema = z.object({
     username: z.string().min(3).max(30).regex(/^[a-zA-Z0-9_]+$/, 'Only letters, numbers, underscores').optional(),
     bio: z.string().max(300).optional(),
     avatarUrl: mediaUrl.optional(),
+    isPrivate: z.boolean().optional(),
   }),
 });
 
@@ -83,17 +88,18 @@ export const sendMessageSchema = z.object({
     content: z.string().max(5000).optional(),
     mediaUrl: mediaUrl.optional(),
     thumbnailUrl: mediaUrl.optional(),
-    type: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT', 'SHARED_POST', 'SHARED_STORY']).optional(),
+    type: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT', 'SHARED_POST', 'SHARED_STORY', 'STICKER']).optional(),
+    stickerId: z.string().uuid().optional(),
     duration: z.number().nonnegative().optional(),
     fileName: z.string().max(255).optional(),
     fileMimeType: z.string().max(255).optional(),
     fileSize: z.number().int().nonnegative().max(2147483647).optional(),
-    sharedReference: z.record(z.unknown()).optional(),
+    sharedReference: z.record(z.string(), z.unknown()).optional(),
     repliedToId: z.string().uuid().optional(),
     receiverId: z.string().uuid().optional(),
   }).refine(
-    (data) => data.content || data.mediaUrl,
-    { message: 'Either content or mediaUrl must be provided' }
+    (data) => data.type === 'STICKER' ? !!data.stickerId && !data.content && !data.mediaUrl && !data.thumbnailUrl : !!(data.content || data.mediaUrl) && !data.stickerId,
+    { message: 'Provide content or media, or a stickerId for sticker messages' }
   ),
   params: z.object({ conversationId: z.string().uuid() }),
 });
@@ -137,7 +143,7 @@ export const replyMessageSchema = z.object({
     fileName: z.string().max(255).optional(),
     fileMimeType: z.string().max(255).optional(),
     fileSize: z.number().int().nonnegative().max(2147483647).optional(),
-    sharedReference: z.record(z.unknown()).optional(),
+    sharedReference: z.record(z.string(), z.unknown()).optional(),
     repliedToId: z.string().uuid(),
     receiverId: z.string().uuid().optional(),
   }).refine(
@@ -155,6 +161,128 @@ export const markDeliveredSchema = z.object({
     messageIds: z.array(z.string().uuid()).min(1),
   }),
 });
+
+// ─── Groups, channels, and sticker packs ────────────────────
+const communityId = z.string().uuid();
+const memberIds = z.array(communityId).min(1).max(100).refine(ids => new Set(ids).size === ids.length, 'Member IDs must be unique');
+const channelSlug = z.string().min(3).max(40).regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/, 'Use a lowercase URL-safe slug');
+
+export const createGroupSchema = z.object({ body: z.object({
+  name: z.string().trim().min(1).max(80), description: z.string().trim().max(1000).optional(),
+  avatarUrl: mediaUrl.nullable().optional(), memberIds,
+}) });
+export const communityIdSchema = z.object({ params: z.object({ conversationId: communityId }) });
+export const updateGroupSchema = z.object({
+  params: z.object({ conversationId: communityId }),
+  body: z.object({ name: z.string().trim().min(1).max(80).optional(), description: z.string().trim().max(1000).nullable().optional(),
+    avatarUrl: mediaUrl.nullable().optional() })
+    .refine(data => data.name !== undefined || data.description !== undefined || data.avatarUrl !== undefined, 'Provide a group name, avatar, or description'),
+});
+export const groupMembersSchema = z.object({ params: z.object({ conversationId: communityId }), body: z.object({ memberIds }) });
+export const groupMemberSchema = z.object({ params: z.object({ conversationId: communityId, memberId: communityId }) });
+export const memberRoleSchema = z.object({
+  params: z.object({ conversationId: communityId, memberId: communityId }),
+  body: z.object({ role: z.enum(['MEMBER', 'ADMIN']) }),
+});
+export const createChannelSchema = z.object({
+  body: z.object({ name: z.string().trim().min(1).max(80), description: z.string().trim().max(1000).optional(),
+    avatarUrl: mediaUrl.nullable().optional(), isPublic: z.boolean().default(false), slug: channelSlug.optional() })
+    .refine(data => !data.isPublic || !!data.slug, 'Public channels require a slug'),
+});
+export const updateChannelSchema = z.object({
+  params: z.object({ conversationId: communityId }),
+  body: z.object({ name: z.string().trim().min(1).max(80).optional(), description: z.string().trim().max(1000).nullable().optional(),
+    avatarUrl: mediaUrl.nullable().optional(), isPublic: z.boolean().optional(), slug: channelSlug.nullable().optional() })
+    .refine(data => Object.values(data).some(value => value !== undefined), 'Provide a channel setting to update'),
+});
+export const joinChannelSchema = z.object({
+  params: z.object({ conversationId: communityId }),
+  body: z.object({ inviteToken: z.string().min(32).max(128).optional() }).strict(),
+});
+export const channelMemberSchema = groupMemberSchema;
+export const stickerPackSchema = z.object({ body: z.object({
+  shortName: z.string().min(3).max(40).regex(/^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/, 'Use a lowercase pack name'),
+  title: z.string().trim().min(1).max(80), description: z.string().trim().max(1000).optional(),
+  isPublic: z.boolean().default(false),
+  stickers: z.array(z.object({ mediaUrl, emoji: z.string().max(32).optional() }).strict()).min(1).max(120),
+}) });
+export const stickerIdSchema = z.object({ params: z.object({ stickerId: communityId }) });
+export const packIdSchema = z.object({ params: z.object({ packId: communityId }) });
+export const paginationQuerySchema = z.object({ query: z.object({
+  cursor: z.string().max(512).optional(), limit: z.coerce.number().int().min(1).max(100).optional(),
+}) });
+
+// ─── Frontend group/channel compatibility contracts ─────────
+const compatId = z.string().uuid();
+const compatMemberIds = z.array(compatId).min(1).max(100).refine(ids => new Set(ids).size === ids.length, 'User IDs must be unique');
+const avatarUrl = mediaUrl.nullable().optional();
+
+export const compatGroupCreateSchema = z.object({ body: z.object({
+  name: z.string().trim().min(1).max(80), memberIds: compatMemberIds,
+  avatarUrl, description: z.string().trim().max(1000).nullable().optional(),
+}) });
+export const compatGroupIdSchema = z.object({ params: z.object({ id: compatId }) });
+export const compatGroupUpdateSchema = z.object({
+  params: z.object({ id: compatId }),
+  body: z.object({ name: z.string().trim().min(1).max(80).optional(), avatarUrl,
+    description: z.string().trim().max(1000).nullable().optional() })
+    .refine(data => data.name !== undefined || data.avatarUrl !== undefined || data.description !== undefined,
+      'Provide a group name, avatar, or description'),
+});
+export const compatGroupAddMembersSchema = z.object({
+  params: z.object({ id: compatId }), body: z.object({ userIds: compatMemberIds }),
+});
+export const compatGroupMemberSchema = z.object({ params: z.object({ id: compatId, userId: compatId }) });
+export const compatGroupRoleSchema = z.object({
+  params: z.object({ id: compatId, userId: compatId }),
+  body: z.object({ role: z.enum(['admin', 'member']) }),
+});
+
+export const channelListQuerySchema = z.object({ query: z.object({
+  query: z.string().trim().max(100).optional().default(''),
+  scope: z.enum(['discover', 'subscribed']).optional().default('discover'),
+  page: z.coerce.number().int().min(1).max(10_000).optional().default(1),
+  limit: z.coerce.number().int().min(1).max(100).optional().default(20),
+}) });
+export const compatChannelIdSchema = z.object({ params: z.object({ id: compatId }) });
+export const compatChannelCreateSchema = z.object({ body: z.object({
+  name: z.string().trim().min(1).max(80), description: z.string().trim().max(1000).nullable().optional(),
+  avatarUrl, isPrivate: z.boolean(),
+}) });
+export const compatChannelJoinSchema = z.object({
+  params: z.object({ id: compatId }),
+  body: z.object({ inviteToken: z.string().min(32).max(128).optional() }).strict(),
+});
+export const channelPostsQuerySchema = z.object({
+  params: z.object({ id: compatId }),
+  query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional().default(20), cursor: z.string().max(512).optional() }),
+});
+const channelPostContent = z.string().max(5000).optional();
+const channelPostMedia = mediaUrl.nullable().optional();
+const channelPostFields = {
+  content: channelPostContent,
+  type: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT', 'STICKER']).optional(),
+  mediaUrl: channelPostMedia,
+  thumbnailUrl: channelPostMedia,
+  fileName: z.string().max(255).nullable().optional(),
+  fileMimeType: z.string().max(255).nullable().optional(),
+  fileSize: z.number().int().nonnegative().max(2_147_483_647).nullable().optional(),
+  duration: z.number().nonnegative().nullable().optional(),
+  pinned: z.boolean().optional(),
+};
+export const channelPostCreateSchema = z.object({
+  params: z.object({ id: compatId }),
+  body: z.object(channelPostFields).refine(data => data.type === 'STICKER'
+    ? !!data.mediaUrl && !data.content?.trim() && !data.thumbnailUrl && !data.fileName && !data.fileMimeType && data.fileSize == null && data.duration == null
+    : !!data.content?.trim() || !!data.mediaUrl,
+  'Provide text or media; sticker posts must reference an accessible sticker asset'),
+});
+export const channelPostUpdateSchema = z.object({
+  params: z.object({ id: compatId, postId: compatId }),
+  body: z.object({ content: z.string().min(1).max(5000).optional(), pinned: z.boolean().optional() })
+    .refine(data => data.content !== undefined || data.pinned !== undefined, 'Provide content or pinned state'),
+});
+export const channelPostIdSchema = z.object({ params: z.object({ id: compatId, postId: compatId }) });
 
 // ─── Stories ────────────────────────────────────────────────
 export const createStorySchema = z.object({

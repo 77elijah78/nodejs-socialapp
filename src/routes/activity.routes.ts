@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate } from '../middlewares/authenticate.js';
+import { abuseProtection } from '../middlewares/abuse-protection.js';
 import { validate } from '../middlewares/validate.js';
 import { notificationIdSchema, notificationPageQuery, notificationReadSchema } from '../middlewares/schemas.js';
 import { activityService } from '../services/activity.service.js';
@@ -9,6 +10,7 @@ import { sendSuccess, buildPaginationMeta } from '../utils/response.js';
 export function createActivityRouter(cursorDefault = false) {
   const router = Router();
   router.use(authenticate);
+  router.use(abuseProtection('social'));
   router.get('/', async (req, res, next) => {
     try {
       const input = notificationPageQuery.parse(req.query);
